@@ -22,7 +22,7 @@
 | `.env.example` | ✅ | 密钥环境变量模板 |
 | `opencode.json.example` | ✅ | OpenCode 手工配置示例（无密钥） |
 | `scripts/pull-upstream.sh` | ✅ | 按需拉取参考源码 |
-| `docs/E2E原生兼容性全景.md` | ✅ | 上游 × Agent 原生 E2E 兼容矩阵（不含中转站） |
+| `docs/E2E原生兼容性全景.md` | ✅ | 上游 × 四 Agent 原生 E2E 兼容矩阵（含 Gemini CLI；不含中转站） |
 | `docs/reports/` | ✅ | 评估结论与复现步骤（见目录内 README 索引） |
 | `.env` | ❌ | 本地 API Key |
 | `.claude/` | ❌ | Claude Code 本地配置（含密钥） |

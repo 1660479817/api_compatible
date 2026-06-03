@@ -1,6 +1,6 @@
 # API Compatible — 上游模型源 × Coding Agent 兼容性评估
 
-在 **上游模型源** 与 **Coding Agent 运行时**（Codex、Claude Code、OpenCode 等）之间，评估 **协议是否对齐、能否端到端跑通**。
+在 **上游模型源** 与 **Coding Agent 运行时**（Codex、Claude Code、OpenCode、Gemini CLI 等）之间，评估 **协议是否对齐、能否端到端跑通**。
 
 | 上游类型 | 说明 | 示例 |
 |----------|------|------|
@@ -91,6 +91,9 @@ v2rayN **TUN 全局**有时不覆盖终端；本机 SOCKS 在 `127.0.0.1:10808` 
 | **Codex** 0.133+ | `/v1/responses` | `OPENAI_BASE_URL`, `OPENAI_API_KEY` |
 | **Claude Code** | `/v1/messages` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` |
 | **OpenCode** | `/v1/chat/completions` | `OPENCODE_CONFIG` / Provider 配置 |
+| **Gemini CLI** | `generateContent` / `streamGenerateContent` | `GEMINI_API_KEY` 或 Vertex（`GOOGLE_GENAI_USE_VERTEXAI` 等） |
+
+完整原生矩阵见 **[E2E 原生兼容性全景](./docs/E2E原生兼容性全景.md)**。本仓库尚无 `t_gemini` 启动器。
 
 ```mermaid
 flowchart LR
