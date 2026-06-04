@@ -52,13 +52,15 @@ Usage: ./t_${agent} [launcher options] [--] [${agent} args...]
 
 Launcher options:
   --site ID          Upstream site from sites.json (default: interactive or default_site)
-  --model MODEL      Model id (default: site default for this agent)
+  --family NAME      Model family: gpt | anthropic | other (inferred from agent if omitted)
+  --model MODEL      Model id (default: assess-plan layer3 for family + agent)
   -y, --yes          Skip interactive prompts; use defaults
   --list-sites       List registered sites
   --list-models      List models from GET /v1/models (--site optional)
   -h, --help         Show this help
 
 Agent traffic always goes through LiteLLM (see scripts/litellm-proxy.sh).
+Codex → family gpt; Claude Code → anthropic; OpenCode defaults to gpt on multi-family sites.
 
 Remaining arguments are passed to the underlying CLI.
 EOF
@@ -122,18 +124,39 @@ maas_pick_site() {
   MAAS_SITE="${_maas_sites[$((choice - 1))]}"
 }
 
+maas_resolve_family() {
+  local agent="$1"
+  if [[ -n "${MAAS_FAMILY:-}" ]]; then
+    return 0
+  fi
+  MAAS_FAMILY="$(maas_py get default_family --site "$MAAS_SITE" --agent "$agent" 2>/dev/null || true)"
+  if [[ -z "$MAAS_FAMILY" ]]; then
+    echo "Error: cannot infer model family for agent ${agent} on site ${MAAS_SITE}; pass --family" >&2
+    exit 1
+  fi
+  echo "Family: ${MAAS_FAMILY} (inferred for ${agent})" >&2
+}
+
+maas_family_args() {
+  if [[ -n "${MAAS_FAMILY:-}" ]]; then
+    echo --family "$MAAS_FAMILY"
+  fi
+}
+
 maas_pick_model() {
   local agent="$1"
+  maas_resolve_family "$agent"
+
   if [[ -n "${MAAS_MODEL:-}" ]]; then
     return 0
   fi
 
   local default
-  default="$(maas_py get default_model --site "$MAAS_SITE" --agent "$agent" 2>/dev/null || true)"
+  default="$(maas_py get default_model --site "$MAAS_SITE" --agent "$agent" $(maas_family_args) 2>/dev/null || true)"
   if [[ "${MAAS_YES:-0}" -eq 1 ]]; then
     MAAS_MODEL="${default}"
     if [[ -z "$MAAS_MODEL" ]]; then
-      echo "Error: no default model for agent ${agent} on site ${MAAS_SITE}" >&2
+      echo "Error: no default model for agent ${agent} family ${MAAS_FAMILY} on site ${MAAS_SITE}" >&2
       exit 1
     fi
     return 0
@@ -178,6 +201,7 @@ maas_pick_model() {
 maas_parse_launcher_args() {
   MAAS_SITE=""
   MAAS_MODEL=""
+  MAAS_FAMILY=""
   MAAS_YES=0
   MAAS_PASSTHRU=()
 
@@ -186,6 +210,11 @@ maas_parse_launcher_args() {
       --site)
         [[ $# -ge 2 ]] || { echo "Error: --site requires a value" >&2; exit 1; }
         MAAS_SITE="$2"
+        shift 2
+        ;;
+      --family|--profile)
+        [[ $# -ge 2 ]] || { echo "Error: --family requires a value" >&2; exit 1; }
+        MAAS_FAMILY="$2"
         shift 2
         ;;
       --model)
@@ -280,6 +309,8 @@ maas_write_agent_config() {
   if [[ -n "${MAAS_MODEL:-}" ]]; then
     cmd+=(--model "$MAAS_MODEL")
   fi
+  # shellcheck disable=SC2046
+  cmd+=($(maas_family_args))
   maas_py "${cmd[@]}"
 }
 
@@ -287,8 +318,11 @@ maas_ensure_litellm() {
   if "${MAAS_ROOT}/scripts/litellm-proxy.sh" status --site "$MAAS_SITE" >/dev/null 2>&1; then
     return 0
   fi
-  echo "Starting LiteLLM for site=${MAAS_SITE}..." >&2
-  "${MAAS_ROOT}/scripts/litellm-proxy.sh" start --site "$MAAS_SITE"
+  echo "Starting LiteLLM for site=${MAAS_SITE} family=${MAAS_FAMILY:-auto}..." >&2
+  local args=(start --site "$MAAS_SITE")
+  # shellcheck disable=SC2046
+  args+=($(maas_family_args))
+  "${MAAS_ROOT}/scripts/litellm-proxy.sh" "${args[@]}"
 }
 
 maas_run_claude() {
@@ -303,7 +337,7 @@ maas_run_claude() {
   maas_write_agent_config claude "$settings" >/dev/null
 
   maas_ensure_claude
-  echo "→ site=${MAAS_SITE} model=${MAAS_MODEL}" >&2
+  echo "→ site=${MAAS_SITE} family=${MAAS_FAMILY} model=${MAAS_MODEL}" >&2
   echo "→ relay=LiteLLM $(maas_py get litellm_relay_base --site "$MAAS_SITE")" >&2
   echo "→ settings=${settings}" >&2
 
@@ -328,7 +362,7 @@ maas_run_codex() {
   local api_key
   api_key="$(maas_py get litellm_master_key --site "$MAAS_SITE")"
 
-  echo "→ site=${MAAS_SITE} model=${MAAS_MODEL}" >&2
+  echo "→ site=${MAAS_SITE} family=${MAAS_FAMILY} model=${MAAS_MODEL}" >&2
   echo "→ relay=LiteLLM $(maas_py get litellm_relay_base --site "$MAAS_SITE")/v1" >&2
   echo "→ config=${config_toml}" >&2
 
@@ -352,9 +386,10 @@ maas_run_opencode() {
   maas_ensure_opencode
 
   local oc_model
-  oc_model="$(maas_py get opencode_model --site "$MAAS_SITE")"
+  # shellcheck disable=SC2046
+  oc_model="$(maas_py get opencode_model --site "$MAAS_SITE" $(maas_family_args))"
 
-  echo "→ site=${MAAS_SITE} model=${oc_model}" >&2
+  echo "→ site=${MAAS_SITE} family=${MAAS_FAMILY} model=${oc_model}" >&2
   echo "→ relay=LiteLLM $(maas_py get litellm_relay_base --site "$MAAS_SITE")/v1" >&2
   echo "→ OPENCODE_CONFIG=${config}" >&2
 

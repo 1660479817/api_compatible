@@ -9,6 +9,7 @@ PROBE_ONLY=0
 SMOKE=0
 AGENTS=()
 AGENTS_SET=0
+FAMILY=""
 
 usage() {
   cat <<'EOF'
@@ -22,7 +23,9 @@ Options:
   --probe-only    Layer 3 relay probe per agent (no smoke)
   --smoke         Layer 3 relay probe + Agent smoke per agent
   --agents LIST   Comma-separated: claude,codex,opencode
-                  Default: protocol scope from sites.json (see CONFIG.md)
+                  Default: family layer3.agents or all agents across families
+  --family NAME   assess-plan families.<NAME> (Layer 2–3 + default agents)
+  --profile NAME  Deprecated alias for --family
   -h, --help      Show this help
 
 Examples:
@@ -52,6 +55,10 @@ while [[ $# -gt 0 ]]; do
     --agents)
       IFS=',' read -r -a AGENTS <<< "${2:-}"
       AGENTS_SET=1
+      shift 2
+      ;;
+    --family|--profile)
+      FAMILY="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -88,13 +95,17 @@ fi
 cd "$ROOT"
 
 if [[ "$AGENTS_SET" -eq 0 ]]; then
-  IFS=',' read -r -a AGENTS <<< "$(python3 "${ROOT}/lib/maas.py" get assess_agents --site "$SITE")"
+  GET_ARGS=(get assess_agents --site "$SITE")
+  [[ -n "$FAMILY" ]] && GET_ARGS+=(--family "$FAMILY")
+  IFS=',' read -r -a AGENTS <<< "$(python3 "${ROOT}/lib/maas.py" "${GET_ARGS[@]}")"
 fi
 
 if [[ "$LAYERS_12" -eq 1 || "$PROBE_ONLY" -eq 1 || "$SMOKE" -eq 1 ]]; then
   ./scripts/assess-platform.sh --site "$SITE"
   echo ""
-  ./scripts/assess-protocol.sh --site "$SITE"
+  PROTO_ARGS=(--site "$SITE")
+  [[ -n "$FAMILY" ]] && PROTO_ARGS+=(--family "$FAMILY")
+  ./scripts/assess-protocol.sh "${PROTO_ARGS[@]}"
 fi
 
 if [[ "$LAYERS_12" -eq 1 ]]; then
@@ -106,6 +117,7 @@ for agent in "${AGENTS[@]}"; do
   case "$agent" in
     claude|codex|opencode)
       flags=(--site "$SITE" --agent "$agent")
+      [[ -n "$FAMILY" ]] && flags+=(--family "$FAMILY")
       if [[ "$PROBE_ONLY" -eq 1 ]]; then
         flags+=(--probe-only)
       fi

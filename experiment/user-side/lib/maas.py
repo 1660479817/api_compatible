@@ -8,6 +8,7 @@ import datetime
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -196,8 +197,28 @@ def http_json(
         except json.JSONDecodeError:
             payload = raw
         return exc.code, payload, latency_ms
+    except (TimeoutError, socket.timeout) as exc:
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return 0, {"error": {"message": str(exc), "type": "timeout"}}, latency_ms
     except urllib.error.URLError as exc:
-        raise SystemExit(f"Network error for {url}: {exc.reason}") from exc
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return 0, {"error": {"message": str(reason), "type": "timeout"}}, latency_ms
+        if "timed out" in str(reason).lower():
+            return 0, {"error": {"message": str(reason), "type": "timeout"}}, latency_ms
+        raise SystemExit(f"Network error for {url}: {reason}") from exc
+
+
+def wire_probe_timeout_sec(*, via_relay: bool, root: Path | None = None) -> float:
+    """HTTP timeout for Layer 2/3 wire probes (relay hops need more headroom)."""
+    plan = load_assess_plan(root)
+    raw = plan.get("relay_probe_timeout_sec" if via_relay else "source_probe_timeout_sec")
+    default = 180.0 if via_relay else 120.0
+    try:
+        return max(30.0, float(raw))
+    except (TypeError, ValueError):
+        return default
 
 
 def cmd_list_sites(sites: dict[str, Any]) -> None:
@@ -232,7 +253,18 @@ def cmd_get(args: argparse.Namespace, sites: dict[str, Any]) -> None:
         agent = args.agent
         if not agent:
             raise SystemExit("--agent required for default_model")
-        print(layer3_models(sid, site).get(agent, ""))
+        fam = assess_family_from_args(args) or resolve_family_for_site_agent(
+            sid, site, agent
+        )
+        print(layer3_models(sid, site, family=fam, profile=fam).get(agent, ""))
+    elif field == "default_family":
+        agent = args.agent
+        if not agent:
+            raise SystemExit("--agent required for default_family")
+        fam = assess_family_from_args(args) or resolve_family_for_site_agent(
+            sid, site, agent
+        )
+        print(fam or "")
     elif field == "notes":
         print(site.get("notes", ""))
     elif field == "litellm_master_key":
@@ -244,14 +276,42 @@ def cmd_get(args: argparse.Namespace, sites: dict[str, Any]) -> None:
     elif field == "protocol":
         print(resolve_protocol(sid, site))
     elif field == "assess_agents":
-        protocol = resolve_protocol(sid, site)
-        print(",".join(PROTOCOL_PROFILES[protocol]["agents"]))
+        fam = assess_family_from_args(args)
+        if fam:
+            print(",".join(agents_for_assess(sid, site, family=fam, profile=fam)))
+        else:
+            print(",".join(agents_in_scope_for_site(sid, site)))
+    elif field in ("families", "profiles"):
+        print(",".join(list_assess_families(sid)))
+    elif field == "primary_agent":
+        fam = assess_family_from_args(args)
+        if not fam:
+            fams = list_assess_families(sid)
+            if len(fams) == 1:
+                fam = fams[0]
+            else:
+                raise SystemExit(
+                    f"--family required for primary_agent (site has families: {fams})"
+                )
+        entry = plan_site_entry(sid, site=site, family=fam, profile=fam)
+        primary = entry.get("primary_agent")
+        if not primary and fam:
+            primary = family_meta(fam, load_assess_plan()).get("primary_agent")
+        print(primary or "")
     elif field == "opencode_provider_id":
-        oc = opencode_provider(sid, site)
+        fam = assess_family_from_args(args) or resolve_family_for_site_agent(
+            sid, site, "opencode"
+        )
+        oc = opencode_provider(sid, site, family=fam, profile=fam)
         print(oc.get("provider_id", "custom"))
     elif field == "opencode_model":
-        model = layer3_models(sid, site).get("opencode", "")
-        provider = opencode_provider(sid, site).get("provider_id", "custom")
+        fam = assess_family_from_args(args) or resolve_family_for_site_agent(
+            sid, site, "opencode"
+        )
+        model = layer3_models(sid, site, family=fam, profile=fam).get("opencode", "")
+        provider = opencode_provider(
+            sid, site, family=fam, profile=fam
+        ).get("provider_id", "custom")
         if not model:
             raise SystemExit("No layer3.models.opencode for site")
         print(f"{provider}/{model}")
@@ -341,8 +401,9 @@ def write_opencode_config(
     model: str,
     out: Path,
     relay_base: str | None = None,
+    family: str | None = None,
 ) -> None:
-    oc = opencode_provider(site_id, site)
+    oc = opencode_provider(site_id, site, family=family)
     provider_id = oc.get("provider_id", site.get("name", "custom").lower())
     provider_name = oc.get("provider_name", site.get("name", provider_id))
     npm = oc.get("npm", "@ai-sdk/openai-compatible")
@@ -369,10 +430,15 @@ def write_opencode_config(
 
 
 def litellm_relay_model_name(
-    site_id: str, site: dict[str, Any], agent: str
+    site_id: str,
+    site: dict[str, Any],
+    agent: str,
+    *,
+    family: str | None = None,
+    profile: str | None = None,
 ) -> str:
     """LiteLLM model_name exposed to Agent; disambiguate Codex bridge when id collides."""
-    dm = layer3_models(site_id, site)
+    dm = layer3_models(site_id, site, family=family, profile=profile)
     model = dm.get(agent, "")
     if not model:
         return ""
@@ -382,13 +448,20 @@ def litellm_relay_model_name(
 
 
 def write_litellm_config(
-    site_id: str, site: dict[str, Any], out: Path, port: int | None = None
+    site_id: str,
+    site: dict[str, Any],
+    out: Path,
+    port: int | None = None,
+    profile: str | None = None,
+    family: str | None = None,
 ) -> None:
     """Generate LiteLLM proxy config: upstream relay + protocol conversion hooks."""
     api_key_env = site["api_key_env"]
     base_url = site["base_url"].rstrip("/")
     anthropic_base = site.get("anthropic_base_url", base_url.removesuffix("/v1"))
-    defaults = layer3_models(site_id, site)
+    defaults = layer3_models(
+        site_id, site, profile=profile, family=family
+    )
     listen_port = port if port is not None else litellm_port(site)
     master_key = litellm_master_key(site_id)
     upstream_key = os.environ.get(api_key_env, "").strip()
@@ -402,13 +475,18 @@ def write_litellm_config(
     protocol = resolve_protocol(site_id, site)
     allowed_agents = set(PROTOCOL_PROFILES[protocol]["agents"])
 
-    for agent in ("opencode", "claude", "codex"):
+    profile_agents = agents_for_assess(
+        site_id, site, profile=profile, family=family
+    )
+    for agent in profile_agents:
         if agent not in allowed_agents:
             continue
         upstream = defaults.get(agent, "")
         if not upstream:
             continue
-        relay_name = litellm_relay_model_name(site_id, site, agent)
+        relay_name = litellm_relay_model_name(
+            site_id, site, agent, family=family, profile=family
+        )
         upstream_base = anthropic_base if agent == "claude" else base_url
         bridge = agent == "codex"
         model_entries.append((relay_name, upstream, upstream_base, bridge))
@@ -449,22 +527,34 @@ def write_litellm_config(
 def cmd_write_config(args: argparse.Namespace, sites: dict[str, Any]) -> None:
     load_dotenv()
     sid, site = site_entry(sites, args.site)
+    agent = args.kind
+    fam = assess_family_from_args(args) or resolve_family_for_site_agent(
+        sid, site, agent
+    )
     relay_base = litellm_relay_base(site)
     api_key = litellm_master_key(sid)
     out = Path(args.out)
     if args.kind == "claude":
         write_claude_config(site, api_key, out, relay_base=relay_base)
     elif args.kind == "codex":
-        dm = layer3_models(sid, site)
-        model = args.model or litellm_relay_model_name(sid, site, "codex") or dm.get("codex", "")
+        dm = layer3_models(sid, site, family=fam, profile=fam)
+        model = (
+            args.model
+            or litellm_relay_model_name(sid, site, "codex", family=fam, profile=fam)
+            or dm.get("codex", "")
+        )
         if not model:
             raise SystemExit("No model specified and assess-plan has no layer3.models.codex")
         write_codex_config(site, model, out, relay_base=relay_base)
     elif args.kind == "opencode":
-        model = args.model or layer3_models(sid, site).get("opencode", "")
+        model = args.model or layer3_models(
+            sid, site, family=fam, profile=fam
+        ).get("opencode", "")
         if not model:
             raise SystemExit("No model specified and assess-plan has no layer3.models.opencode")
-        write_opencode_config(sid, site, api_key, model, out, relay_base=relay_base)
+        write_opencode_config(
+            sid, site, api_key, model, out, relay_base=relay_base, family=fam
+        )
     print(out)
 
 
@@ -474,13 +564,16 @@ def cmd_write_litellm_config(args: argparse.Namespace, sites: dict[str, Any]) ->
     api_key_for(site)
     out = Path(args.out)
     port = args.port if args.port else litellm_port(site)
-    write_litellm_config(sid, site, out, port=port)
+    fam = assess_family_from_args(args)
+    write_litellm_config(sid, site, out, port=port, family=fam, profile=fam)
     print(out)
 
 
 def probe_label(status: int, ok_codes: set[int]) -> str:
     if status in ok_codes:
         return "OK"
+    if status == 0:
+        return "TIMEOUT"
     if status in {401, 403}:
         return f"HTTP {status}"
     if status == 404:
@@ -522,17 +615,280 @@ def load_assess_models(root: Path | None = None) -> dict[str, Any]:
     return load_assess_plan(root)
 
 
+def site_family_map(entry: dict[str, Any]) -> dict[str, Any]:
+    """Per-site model families (profiles is a deprecated alias)."""
+    fam = entry.get("families")
+    if isinstance(fam, dict):
+        return fam
+    prof = entry.get("profiles")
+    if isinstance(prof, dict):
+        return prof
+    return {}
+
+
+def list_assess_families(site_id: str, plan: dict[str, Any] | None = None) -> list[str]:
+    cfg = plan if plan is not None else load_assess_plan()
+    entry = cfg.get("sites", {}).get(site_id, {})
+    return sorted(site_family_map(entry))
+
+
+def list_assess_profiles(site_id: str, plan: dict[str, Any] | None = None) -> list[str]:
+    """Deprecated alias for list_assess_families."""
+    return list_assess_families(site_id, plan)
+
+
+def family_meta(family_key: str, plan: dict[str, Any]) -> dict[str, Any]:
+    builtin: dict[str, dict[str, Any]] = {
+        "gpt": {
+            "label": "GPT / OpenAI",
+            "primary_agent": "codex",
+            "layer2_wires": ["chat", "responses"],
+            "layer3_agents": ["opencode", "codex"],
+        },
+        "anthropic": {
+            "label": "Anthropic / Claude",
+            "primary_agent": "claude",
+            "layer2_wires": ["chat", "messages"],
+            "layer3_agents": ["opencode", "claude"],
+        },
+        "other": {
+            "label": "Other (OpenCode probe)",
+            "primary_agent": "opencode",
+            "layer2_wires": ["chat"],
+            "layer3_agents": ["opencode"],
+        },
+    }
+    global_defs = plan.get("model_families", {})
+    if family_key in global_defs:
+        base = dict(builtin.get(family_key, {}))
+        base.update(global_defs[family_key])
+        return base
+    if family_key in builtin:
+        return builtin[family_key]
+    raise SystemExit(
+        f"Unknown model family {family_key!r}; expected one of: "
+        f"{sorted({*builtin, *global_defs})}"
+    )
+
+
+def assess_family_from_args(args: argparse.Namespace) -> str | None:
+    return getattr(args, "family", None) or getattr(args, "profile", None) or None
+
+
+def resolve_assess_family(
+    site_id: str,
+    entry: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    family: str | None = None,
+    profile: str | None = None,
+) -> str | None:
+    key = family or profile
+    fam_map = site_family_map(entry)
+    if key:
+        if key not in fam_map:
+            raise SystemExit(
+                f"Unknown model family {key!r} for site {site_id}; "
+                f"available: {sorted(fam_map) or '(none — omit --family)'}"
+            )
+        return key
+    if len(fam_map) == 1:
+        return next(iter(fam_map))
+    return None
+
+
+def resolve_family_for_site_agent(
+    site_id: str,
+    site: dict[str, Any],
+    agent: str,
+    plan: dict[str, Any] | None = None,
+    *,
+    family: str | None = None,
+    profile: str | None = None,
+) -> str | None:
+    """Resolve model family: explicit flag, single-family site, or agent default."""
+    cfg = plan if plan is not None else load_assess_plan()
+    entry = cfg.get("sites", {}).get(site_id, {})
+    key = family or profile
+    if key:
+        resolve_assess_family(site_id, entry, cfg, family=key, profile=profile)
+        return key
+    auto = resolve_assess_family(site_id, entry, cfg)
+    if auto:
+        return auto
+
+    fam_map = site_family_map(entry)
+    if not fam_map:
+        return None
+
+    matches: list[str] = []
+    for fam_key in sorted(fam_map):
+        if agent in agents_for_assess(site_id, site, cfg, family=fam_key):
+            matches.append(fam_key)
+    if len(matches) == 1:
+        return matches[0]
+
+    preferred = {"codex": "gpt", "claude": "anthropic"}.get(agent)
+    if preferred and preferred in matches:
+        return preferred
+
+    if agent == "opencode":
+        for candidate in ("gpt", "anthropic", "other"):
+            if candidate in matches:
+                return candidate
+
+    if not matches:
+        raise SystemExit(
+            f"Agent {agent!r} is not in any model family for site {site_id}; "
+            "check assess-plan.json families.*.layer3.agents"
+        )
+
+    raise SystemExit(
+        f"Agent {agent!r} is valid in multiple families {matches} for site {site_id}; "
+        "pass --family (e.g. --family gpt)"
+    )
+
+
+def expand_family_overlay(
+    site_entry: dict[str, Any],
+    family_key: str,
+    fam_cfg: dict[str, Any],
+    plan: dict[str, Any],
+    site_id: str,
+    site: dict[str, Any],
+) -> dict[str, Any]:
+    meta = family_meta(family_key, plan)
+    protocol = resolve_protocol(site_id, site)
+    proto_wires = set(PROTOCOL_PROFILES[protocol]["wires"])
+
+    models = fam_cfg.get("models", [])
+    if isinstance(models, str):
+        models = [models]
+    wires = fam_cfg.get("layer2_wires") or meta.get("layer2_wires", ["chat"])
+    filtered_wires = [w for w in wires if w in proto_wires]
+    targets = [{"model": str(m), "wires": filtered_wires or ["chat"]} for m in models]
+
+    base_l3 = dict(site_entry.get("layer3") or {})
+    ol3 = fam_cfg.get("layer3") or {}
+    if not isinstance(ol3, dict):
+        ol3 = {}
+    models_map = dict(ol3.get("models") or {})
+    default_model = str(models[0]) if models else ""
+    if default_model:
+        models_map.setdefault("opencode", default_model)
+        primary = meta.get("primary_agent")
+        if primary:
+            models_map.setdefault(str(primary), default_model)
+
+    agents = ol3.get("agents") or meta.get("layer3_agents", ["opencode"])
+    allowed = set(PROTOCOL_PROFILES[protocol]["agents"])
+    agents = [str(a) for a in agents if a in allowed]
+
+    merged_l3: dict[str, Any] = {
+        k: v for k, v in base_l3.items() if k not in ("models", "agents", "opencode")
+    }
+    merged_l3.update({k: v for k, v in ol3.items() if k not in ("models", "agents", "opencode")})
+    merged_l3["models"] = models_map
+    merged_l3["agents"] = agents
+    if ol3.get("opencode"):
+        merged_l3["opencode"] = ol3["opencode"]
+    elif base_l3.get("opencode"):
+        merged_l3["opencode"] = base_l3["opencode"]
+
+    primary = fam_cfg.get("primary_agent") or meta.get("primary_agent")
+    return {
+        "layer2": {"targets": targets},
+        "layer3": merged_l3,
+        "assess_family": family_key,
+        "assess_family_label": meta.get("label", family_key),
+        "primary_agent": primary,
+    }
+
+
 def plan_site_entry(
-    site_id: str, plan: dict[str, Any] | None = None
+    site_id: str,
+    plan: dict[str, Any] | None = None,
+    site: dict[str, Any] | None = None,
+    *,
+    family: str | None = None,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     cfg = plan if plan is not None else load_assess_plan()
-    return cfg.get("sites", {}).get(site_id, {})
+    entry = dict(cfg.get("sites", {}).get(site_id, {}))
+    if site is None:
+        sites = load_sites()
+        _, site = site_entry(sites, site_id)
+
+    fam_key = resolve_assess_family(
+        site_id, entry, cfg, family=family, profile=profile
+    )
+    fam_map = site_family_map(entry)
+
+    if fam_key:
+        expanded = expand_family_overlay(
+            entry, fam_key, fam_map[fam_key], cfg, site_id, site
+        )
+        entry["layer2"] = expanded["layer2"]
+        entry["layer3"] = expanded["layer3"]
+        entry["assess_family"] = expanded["assess_family"]
+        entry["assess_family_label"] = expanded["assess_family_label"]
+        entry["primary_agent"] = expanded["primary_agent"]
+        return entry
+
+    if fam_map and not layer2_raw_targets(entry):
+        raise SystemExit(
+            f"Site {site_id} has model families {sorted(fam_map)}; "
+            "pass --family for Layer 2–3 (e.g. --family gpt)"
+        )
+    return entry
+
+
+def agents_for_assess(
+    site_id: str,
+    site: dict[str, Any],
+    plan: dict[str, Any] | None = None,
+    profile: str | None = None,
+    family: str | None = None,
+) -> list[str]:
+    protocol = resolve_protocol(site_id, site)
+    entry = plan_site_entry(
+        site_id, plan, site, family=family, profile=profile
+    )
+    custom = entry.get("layer3", {}).get("agents")
+    allowed = PROTOCOL_PROFILES[protocol]["agents"]
+    if isinstance(custom, list) and custom:
+        return [str(a) for a in custom if a in allowed]
+    return list(allowed)
+
+
+def agents_in_scope_for_site(
+    site_id: str,
+    site: dict[str, Any],
+    plan: dict[str, Any] | None = None,
+) -> list[str]:
+    cfg = plan if plan is not None else load_assess_plan()
+    entry = cfg.get("sites", {}).get(site_id, {})
+    fam_map = site_family_map(entry)
+    if fam_map:
+        agents: set[str] = set()
+        for fam_key in fam_map:
+            agents.update(
+                agents_for_assess(site_id, site, cfg, family=fam_key)
+            )
+        return sorted(agents)
+    return list(PROTOCOL_PROFILES[resolve_protocol(site_id, site)]["agents"])
 
 
 def layer3_models(
-    site_id: str, site: dict[str, Any], plan: dict[str, Any] | None = None
+    site_id: str,
+    site: dict[str, Any],
+    plan: dict[str, Any] | None = None,
+    profile: str | None = None,
+    family: str | None = None,
 ) -> dict[str, Any]:
-    entry = plan_site_entry(site_id, plan)
+    entry = plan_site_entry(
+        site_id, plan, site, family=family, profile=profile
+    )
     models = entry.get("layer3", {}).get("models")
     if isinstance(models, dict) and models:
         return models
@@ -543,9 +899,15 @@ def layer3_models(
 
 
 def opencode_provider(
-    site_id: str, site: dict[str, Any], plan: dict[str, Any] | None = None
+    site_id: str,
+    site: dict[str, Any],
+    plan: dict[str, Any] | None = None,
+    profile: str | None = None,
+    family: str | None = None,
 ) -> dict[str, Any]:
-    entry = plan_site_entry(site_id, plan)
+    entry = plan_site_entry(
+        site_id, plan, site, family=family, profile=profile
+    )
     oc = entry.get("layer3", {}).get("opencode") or entry.get("opencode")
     if isinstance(oc, dict):
         return oc
@@ -684,12 +1046,47 @@ def expand_assess_targets(
     return out
 
 
+def relay_model_and_wire_for_agent(
+    site_id: str,
+    site: dict[str, Any],
+    agent: str,
+    root: Path | None = None,
+    profile: str | None = None,
+    family: str | None = None,
+) -> tuple[str, str]:
+    """Layer 3 model+wire: assess-plan layer3.models[agent], else layer2 fallback."""
+    plan = load_assess_plan(root)
+    models = layer3_models(site_id, site, plan, profile=profile, family=family)
+    model = models.get(agent)
+    if model:
+        wires = AGENT_TO_WIRES.get(agent, [])
+        if wires:
+            return str(model), wires[0]
+    protocol, targets = assess_targets_for_site(
+        site_id, site, root, profile=profile, family=family
+    )
+    relay_target = relay_target_for_agent(targets, agent)
+    if relay_target:
+        return relay_target
+    fam = family or profile
+    raise SystemExit(
+        f"No model for agent {agent!r} (set layer3.models.{agent} or layer2 target "
+        f"with wire in {AGENT_TO_WIRES.get(agent, [])!r}; family={fam or 'default'})"
+    )
+
+
 def assess_targets_for_site(
-    site_id: str, site: dict[str, Any], root: Path | None = None
+    site_id: str,
+    site: dict[str, Any],
+    root: Path | None = None,
+    profile: str | None = None,
+    family: str | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     cfg = load_assess_plan(root)
     protocol = resolve_protocol(site_id, site)
-    entry = plan_site_entry(site_id, cfg)
+    entry = plan_site_entry(
+        site_id, cfg, site, family=family, profile=profile
+    )
     raw = layer2_raw_targets(entry)
     if raw:
         targets = expand_assess_targets(raw, protocol)
@@ -777,6 +1174,156 @@ def response_excerpt(payload: Any, limit: int = 160) -> str:
     return text[:limit]
 
 
+def format_probe_body_summary(wire: str, body: dict[str, Any]) -> str:
+    model = body.get("model", "?")
+    if wire == "chat":
+        n_msg = len(body.get("messages") or [])
+        return (
+            f"model={model!r}, messages[{n_msg}], "
+            f"max_tokens={body.get('max_tokens', '?')}, stream={body.get('stream', False)}"
+        )
+    if wire == "messages":
+        n_msg = len(body.get("messages") or [])
+        return (
+            f"model={model!r}, messages[{n_msg}], "
+            f"max_tokens={body.get('max_tokens', '?')}, stream={body.get('stream', False)}"
+        )
+    if wire == "responses":
+        inp = body.get("input", "")
+        inp_len = len(inp) if isinstance(inp, str) else "?"
+        return (
+            f"model={model!r}, input_len={inp_len}, "
+            f"max_output_tokens={body.get('max_output_tokens', '?')}, "
+            f"stream={body.get('stream', False)}"
+        )
+    return json.dumps(body, ensure_ascii=False)[:120]
+
+
+def payload_top_level_summary(payload: Any) -> str:
+    if payload is None:
+        return "(empty body)"
+    if not isinstance(payload, dict):
+        return f"non-JSON body ({type(payload).__name__}): {str(payload)[:120]}"
+    keys = sorted(payload.keys())
+    parts = [f"keys=[{', '.join(keys)}]"]
+    if "object" in payload:
+        parts.append(f"object={payload.get('object')!r}")
+    if "error" in payload:
+        parts.append(f"error={error_detail(payload)!r}")
+    data = payload.get("data")
+    if isinstance(data, list):
+        parts.append(f"data[{len(data)}]")
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        parts.append(f"choices[{len(choices)}]")
+    output = payload.get("output")
+    if isinstance(output, list):
+        parts.append(f"output[{len(output)}]")
+    usage = payload.get("usage")
+    if isinstance(usage, dict) and usage:
+        usage_bits = [
+            f"{k}={usage[k]}"
+            for k in (
+                "total_tokens",
+                "input_tokens",
+                "output_tokens",
+                "prompt_tokens",
+                "completion_tokens",
+            )
+            if k in usage
+        ]
+        if usage_bits:
+            parts.append("usage{" + ", ".join(usage_bits) + "}")
+    return "; ".join(parts)
+
+
+def describe_facet_lines(wire: str, facets: dict[str, Any], http_status: int) -> list[str]:
+    shape = facets.get("shape", "?")
+    usage = facets.get("usage", "?")
+    stream = facets.get("stream", "?")
+    lines: list[str] = []
+    if http_status != 200:
+        lines.append(f"shape={shape}: skipped (HTTP {http_status})")
+    elif shape == "ok":
+        if wire == "chat":
+            lines.append("shape=ok: choices[0] has message.content or text")
+        elif wire == "messages":
+            lines.append("shape=ok: content block or string present")
+        elif wire == "responses":
+            lines.append("shape=ok: output[] or output_text present")
+        else:
+            lines.append("shape=ok")
+    elif shape == "empty":
+        lines.append(f"shape=empty: HTTP 200 but no extractable {wire} payload text")
+    else:
+        lines.append(f"shape={shape}: response not in expected {wire} envelope")
+
+    if usage == "ok":
+        lines.append("usage=ok: usage block reports token counts > 0")
+    elif usage == "zero":
+        lines.append("usage=zero: usage present but all token fields are 0")
+    elif usage == "missing":
+        lines.append("usage=missing: no usage block or no recognized token fields")
+    else:
+        lines.append(f"usage={usage}")
+
+    if stream == "ok":
+        ms = facets.get("stream_latency_ms")
+        suffix = f" ({ms} ms)" if ms is not None else ""
+        lines.append(f"stream=ok: SSE follow-up saw data:/event: markers{suffix}")
+    elif stream == "fail":
+        ms = facets.get("stream_latency_ms")
+        suffix = f" ({ms} ms)" if ms is not None else ""
+        lines.append(f"stream=fail: SSE follow-up missing expected markers{suffix}")
+    elif stream == "skip":
+        lines.append("stream=skip: not probed (sync call failed or stream check disabled)")
+    else:
+        lines.append(f"stream={stream}")
+    return lines
+
+
+def print_wire_protocol_exchange(
+    model: str,
+    wire: str,
+    endpoint: str,
+    probe: dict[str, Any],
+    *,
+    hop: str = "source direct",
+    auth_note: str = "Authorization: Bearer <api_key_env>",
+) -> None:
+    """Terminal-only protocol detail (not used by report markdown)."""
+    req = probe.get("request") or {}
+    body = req.get("body") or {}
+    extra = req.get("extra_headers") or {}
+    url = probe.get("url", "")
+    st = probe.get("http_status", 0)
+    print("")
+    print(f"  ▶ {model} · {wire} · {endpoint} ({hop})")
+    print(f"    POST {url}")
+    print(f"    Request: {format_probe_body_summary(wire, body)}")
+    if extra:
+        print(f"    Extra headers: {', '.join(f'{k}={v!r}' for k, v in extra.items())}")
+    print(f"    Auth: {auth_note}")
+    print(
+        f"    Sync response: HTTP {st} · {probe.get('latency_ms', 0)} ms · "
+        f"result={probe.get('result', '?')}"
+    )
+    print(f"    Envelope: {payload_top_level_summary(probe.get('payload'))}")
+    detail = probe.get("detail") or ""
+    if detail:
+        print(f"    Excerpt: {detail}")
+    facets = probe.get("facets") or {}
+    for line in describe_facet_lines(wire, facets, st):
+        print(f"    · {line}")
+    stream_body = probe.get("stream_request")
+    if stream_body:
+        print(f"    Stream follow-up: POST {url}")
+        print(
+            f"    Stream request: {format_probe_body_summary(wire, stream_body)}; "
+            "Accept=text/event-stream"
+        )
+
+
 def wire_response_shape(wire: str, payload: Any) -> str:
     """Hard-gate facet: ok | empty | missing."""
     if not isinstance(payload, dict):
@@ -828,6 +1375,7 @@ def probe_wire_stream(
     wire: str,
     *,
     probe_base: str | None = None,
+    root: Path | None = None,
 ) -> tuple[str, float]:
     """Soft facet: ok | fail | skip. Returns (status, latency_ms)."""
     via_relay = probe_base is not None
@@ -846,15 +1394,13 @@ def probe_wire_stream(
         headers.update(extra)
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    stream_timeout = wire_probe_timeout_sec(via_relay=via_relay, root=root)
     t0 = time.perf_counter()
     try:
-        with _http_opener(url).open(req, timeout=60) as resp:
+        with _http_opener(url).open(req, timeout=stream_timeout) as resp:
             chunk = resp.read(2048)
             latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-    except urllib.error.HTTPError:
-        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-        return "fail", latency_ms
-    except urllib.error.URLError:
+    except (TimeoutError, socket.timeout, urllib.error.HTTPError, urllib.error.URLError):
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         return "fail", latency_ms
     markers = (b"data:", b"event:", b"content_block_delta", b"response.output_text.delta")
@@ -871,6 +1417,7 @@ def probe_model_wire(
     *,
     probe_base: str | None = None,
     check_stream: bool = True,
+    root: Path | None = None,
 ) -> dict[str, Any]:
     via_relay = probe_base is not None
     base = (probe_base or site["base_url"]).rstrip("/")
@@ -878,7 +1425,10 @@ def probe_model_wire(
     endpoint = WIRE_TO_ENDPOINT[wire]
     body, extra = probe_wire_body(wire, model)
     url = wire_probe_url(site, base, agent_id, endpoint, via_relay=via_relay)
-    st, payload, latency_ms = http_json("POST", url, key, body, extra_headers=extra)
+    timeout = wire_probe_timeout_sec(via_relay=via_relay, root=root)
+    st, payload, latency_ms = http_json(
+        "POST", url, key, body, extra_headers=extra, timeout=timeout
+    )
     shape = wire_response_shape(wire, payload) if st == 200 else "missing"
     usage = wire_usage_facet(payload) if st == 200 else "missing"
     hard_ok = st == 200 and shape == "ok"
@@ -894,18 +1444,26 @@ def probe_model_wire(
     facets: dict[str, Any] = {"shape": shape, "usage": usage}
     if check_stream and hard_ok:
         stream_status, stream_ms = probe_wire_stream(
-            site, key, model, wire, probe_base=probe_base
+            site, key, model, wire, probe_base=probe_base, root=root
         )
         facets["stream"] = stream_status
         facets["stream_latency_ms"] = stream_ms
     else:
         facets["stream"] = "skip"
+    stream_request: dict[str, Any] | None = None
+    if check_stream and hard_ok:
+        stream_request = dict(body)
+        stream_request["stream"] = True
     return {
         "http_status": st,
         "result": result,
         "detail": detail,
         "latency_ms": latency_ms,
         "facets": facets,
+        "url": url,
+        "payload": payload,
+        "request": {"method": "POST", "body": body, "extra_headers": extra or {}},
+        "stream_request": stream_request,
     }
 
 
@@ -943,7 +1501,9 @@ def print_supported_vs_catalog(
 def run_layer1(sid: str, site: dict[str, Any], key: str) -> dict[str, Any]:
     branch, st, ids, payload, latency_ms = fetch_models_catalog(site, key)
     protocol = resolve_protocol(sid, site)
-    profile = PROTOCOL_PROFILES[protocol]
+    proto_prof = PROTOCOL_PROFILES[protocol]
+    plan = load_assess_plan()
+    families = list_assess_families(sid, plan)
     supported = site_supported_models(site)
     doc_set, cat_set = set(supported), set(ids)
     platform_ok = st == 200
@@ -966,22 +1526,38 @@ def run_layer1(sid: str, site: dict[str, Any], key: str) -> dict[str, Any]:
         "catalog_only": sorted(cat_set - doc_set),
         "in_both": sorted(doc_set & cat_set),
         "protocol": protocol,
-        "protocol_label": profile["label"],
-        "agents_in_scope": [AGENT_LABELS[a] for a in profile["agents"]],
+        "protocol_label": proto_prof["label"],
+        "model_families": families,
+        "agents_in_scope": [
+            AGENT_LABELS[a] for a in agents_in_scope_for_site(sid, site, plan)
+        ],
         "error_detail": error_detail(payload) if branch == "unavailable" else "",
+        "catalog_envelope": payload_top_level_summary(payload) if st == 200 else "",
     }
 
 
-def print_layer1(sid: str, site: dict[str, Any], result: dict[str, Any]) -> None:
+def print_layer1(
+    sid: str, site: dict[str, Any], result: dict[str, Any], *, verbose: bool = False
+) -> None:
     print("Layer 1 — Platform link (/v1/models)")
     print(f"Site: {sid} ({site.get('name', sid)})")
     print(f"Base: {site['base_url']}")
     print(f"Auth: {site['api_key_env']} (Bearer)")
     print("")
+    models_url = f"{site['base_url'].rstrip('/')}/models"
     print(f"GET /v1/models: {probe_label(result['http_status'], {200})} ({result['latency_ms']} ms)")
+    if verbose:
+        print(f"  GET {models_url}")
+        print(f"  Auth: Authorization: Bearer ({site['api_key_env']})")
+        if result.get("catalog_envelope"):
+            print(f"  Response envelope: {result['catalog_envelope']}")
+    elif result["http_status"] != 200 and result.get("error_detail"):
+        print(f"  Error: {result['error_detail']}")
     print(f"Catalog branch: {result['catalog_branch']}")
-    print(f"Protocol profile: {result['protocol']} ({result['protocol_label']})")
-    print(f"Default agents in scope: {', '.join(result['agents_in_scope'])}")
+    print(f"Transport protocol: {result['protocol']} ({result['protocol_label']})")
+    if result.get("model_families"):
+        print(f"Model families: {', '.join(result['model_families'])}")
+    print(f"Agents in scope (all families): {', '.join(result['agents_in_scope'])}")
     branch = result["catalog_branch"]
     ids = result["catalog_ids"]
     supported = result["supported_models"]
@@ -1015,18 +1591,30 @@ def cmd_assess_platform(args: argparse.Namespace, sites: dict[str, Any]) -> None
     sid, site = site_entry(sites, args.site)
     key = api_key_for(site)
     result = run_layer1(sid, site, key)
-    print_layer1(sid, site, result)
+    print_layer1(sid, site, result, verbose=getattr(args, "verbose", False))
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def run_layer2(
-    sid: str, site: dict[str, Any], key: str, root: Path | None = None
+    sid: str,
+    site: dict[str, Any],
+    key: str,
+    root: Path | None = None,
+    assess_family: str | None = None,
+    assess_profile: str | None = None,
 ) -> dict[str, Any]:
+    fam = assess_family or assess_profile
     branch, _, catalog_ids, _, _catalog_ms = fetch_models_catalog(site, key)
     catalog_set = set(catalog_ids)
-    protocol, targets = assess_targets_for_site(sid, site, root)
-    profile = PROTOCOL_PROFILES[protocol]
+    protocol, targets = assess_targets_for_site(
+        sid, site, root, family=fam, profile=fam
+    )
+    prof = PROTOCOL_PROFILES[protocol]
+    plan_agents = agents_for_assess(sid, site, family=fam, profile=fam)
+    plan_entry = plan_site_entry(
+        sid, load_assess_plan(root), site, family=fam, profile=fam
+    )
     supported = site_supported_models(site)
     rows: list[dict[str, Any]] = []
     wire_best: dict[str, tuple[str, str]] = {}
@@ -1035,7 +1623,7 @@ def run_layer2(
         model = target["model"]
         for wire in target.get("wires", []):
             endpoint = WIRE_TO_ENDPOINT.get(wire, wire)
-            probe = probe_model_wire(site, key, model, wire)
+            probe = probe_model_wire(site, key, model, wire, root=root)
             rows.append({
                 "model": model,
                 "wire": wire,
@@ -1043,7 +1631,9 @@ def run_layer2(
                 "result": probe["result"],
                 "detail": probe["detail"],
                 "latency_ms": probe["latency_ms"],
+                "http_status": probe["http_status"],
                 "facets": probe["facets"],
+                "interaction": probe,
             })
             if probe["result"] == "OK":
                 wire_best[wire] = (model, probe["result"])
@@ -1051,7 +1641,7 @@ def run_layer2(
                 wire_best[wire] = (model, probe["result"])
 
     agent_readiness: dict[str, bool] = {}
-    for agent_id in profile["agents"]:
+    for agent_id in plan_agents:
         agent_wires = AGENT_TO_WIRES[agent_id]
         agent_readiness[agent_id] = any(
             r["result"] == "OK" and r["wire"] in agent_wires for r in rows
@@ -1071,9 +1661,9 @@ def run_layer2(
         "pass": any_ok,
         "catalog_branch": branch,
         "protocol": protocol,
-        "protocol_label": profile["label"],
-        "agents_in_scope": [AGENT_LABELS[a] for a in profile["agents"]],
-        "wires_in_scope": profile["wires"],
+        "protocol_label": prof["label"],
+        "agents_in_scope": [AGENT_LABELS[a] for a in plan_agents],
+        "wires_in_scope": prof["wires"],
         "targets": targets,
         "target_catalog": target_catalog,
         "rows": rows,
@@ -1082,11 +1672,28 @@ def run_layer2(
             for w in wire_best
         },
         "agent_readiness": agent_readiness,
+        "assess_family": plan_entry.get("assess_family") or fam,
+        "assess_family_label": plan_entry.get("assess_family_label", ""),
+        "primary_agent": plan_entry.get("primary_agent", ""),
+        "assess_profile": fam,
     }
 
 
-def print_layer2(sid: str, site: dict[str, Any], result: dict[str, Any]) -> None:
+def print_layer2(
+    sid: str,
+    site: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    verbose: bool = False,
+) -> None:
     print("Layer 2 — Model × wire (source direct)")
+    if result.get("assess_family"):
+        label = result.get("assess_family_label") or result["assess_family"]
+        primary = result.get("primary_agent", "")
+        extra = f" · primary Agent: {primary}" if primary else ""
+        print(f"Model family: {result['assess_family']} ({label}){extra}")
+    elif result.get("assess_profile"):
+        print(f"Model family: {result['assess_profile']}")
     print(f"Site: {sid} ({site.get('name', sid)})")
     print(f"OpenAI base: {site['base_url']}")
     print(
@@ -1120,8 +1727,8 @@ def print_layer2(sid: str, site: dict[str, Any], result: dict[str, Any]) -> None
         print("Blind test mode: using assess-plan.json layer2 targets")
         print("")
 
-    print(f"{'Model':<22} {'Wire':<12} {'Endpoint':<22} {'ms':<8} Result   Facets")
-    print("-" * 110)
+    print(f"{'Model':<22} {'Wire':<12} {'Endpoint':<22} {'HTTP':<6} {'ms':<8} Result   Facets")
+    print("-" * 118)
     for row in result["rows"]:
         facets = row.get("facets") or {}
         facet_str = (
@@ -1129,10 +1736,33 @@ def print_layer2(sid: str, site: dict[str, Any], result: dict[str, Any]) -> None
             f"usage={facets.get('usage','?')} "
             f"stream={facets.get('stream','?')}"
         )
-        print(
+        http_st = row.get("http_status", "—")
+        line = (
             f"{row['model']:<22} {row['wire']:<12} {row['endpoint']:<22} "
-            f"{row.get('latency_ms', 0):<8} {row['result']:<8} {facet_str}"
+            f"{http_st!s:<6} {row.get('latency_ms', 0):<8} {row['result']:<8} {facet_str}"
         )
+        print(line)
+        if not verbose and row.get("detail") and row["result"] != "OK":
+            print(f"  ↳ {row['detail'][:140]}")
+
+    if verbose:
+        print("")
+        print("Protocol exchanges (sync POST + optional SSE follow-up):")
+        auth_note = f"Authorization: Bearer ({site['api_key_env']})"
+        for row in result["rows"]:
+            interaction = row.get("interaction")
+            if interaction:
+                print_wire_protocol_exchange(
+                    row["model"],
+                    row["wire"],
+                    row["endpoint"],
+                    interaction,
+                    hop="source direct",
+                    auth_note=auth_note,
+                )
+    else:
+        print("")
+        print("  (use --verbose for per-wire protocol exchange detail)")
 
     print("")
     print("Wire summary (best result per wire among tested models):")
@@ -1160,22 +1790,27 @@ def cmd_assess_protocol(args: argparse.Namespace, sites: dict[str, Any]) -> None
     root = repo_root()
     sid, site = site_entry(sites, args.site)
     key = api_key_for(site)
-    result = run_layer2(sid, site, key, root)
-    print_layer2(sid, site, result)
+    fam = assess_family_from_args(args)
+    result = run_layer2(sid, site, key, root, assess_family=fam)
+    print_layer2(sid, site, result, verbose=getattr(args, "verbose", False))
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
     if not result["pass"]:
         raise SystemExit(1)
 
 
-def ensure_litellm_proxy(site_id: str) -> None:
+def ensure_litellm_proxy(
+    site_id: str,
+    profile: str | None = None,
+    family: str | None = None,
+) -> None:
     root = repo_root()
     script = root / "scripts" / "litellm-proxy.sh"
-    subprocess.run(
-        [str(script), "start", "--site", site_id],
-        cwd=str(root),
-        check=True,
-    )
+    cmd = [str(script), "start", "--site", site_id]
+    fam = family or profile
+    if fam:
+        cmd.extend(["--family", fam])
+    subprocess.run(cmd, cwd=str(root), check=True)
 
 
 def run_layer3_relay(
@@ -1184,27 +1819,32 @@ def run_layer3_relay(
     agent: str,
     root: Path | None = None,
     port: int | None = None,
+    profile: str | None = None,
+    family: str | None = None,
 ) -> dict[str, Any]:
-    protocol, targets = assess_targets_for_site(sid, site, root)
-    profile = PROTOCOL_PROFILES[protocol]
-    if agent not in profile["agents"]:
-        in_scope = ", ".join(profile["agents"])
+    fam = family or profile
+    protocol = resolve_protocol(sid, site)
+    prof = PROTOCOL_PROFILES[protocol]
+    scope = agents_for_assess(sid, site, family=fam, profile=fam)
+    if agent not in scope:
         raise SystemExit(
-            f"Agent {agent!r} out of protocol scope ({protocol}); "
-            f"in scope: {in_scope}"
+            f"Agent {agent!r} not in assess scope for {sid!r} "
+            f"(family={fam or 'default'}; in scope: {', '.join(scope)})"
         )
-    relay_target = relay_target_for_agent(targets, agent)
-    if not relay_target:
-        raise SystemExit(
-            f"No assess-plan layer2 target for agent {agent!r} under protocol {protocol}"
-        )
-    model, wire = relay_target
+    model, wire = relay_model_and_wire_for_agent(
+        sid, site, agent, root, family=fam, profile=fam
+    )
+    plan_entry = plan_site_entry(
+        sid, load_assess_plan(root), site, family=fam, profile=fam
+    )
     listen_port = port if port is not None else litellm_port(site)
     key = litellm_master_key(sid)
     probe_base = f"http://127.0.0.1:{listen_port}/v1"
     endpoint = WIRE_TO_ENDPOINT[wire]
     bridge = agent == "codex"
-    probe = probe_model_wire(site, key, model, wire, probe_base=probe_base)
+    probe = probe_model_wire(
+        site, key, model, wire, probe_base=probe_base, root=root
+    )
     return {
         "pass": probe["result"] == "OK",
         "agent": agent,
@@ -1216,17 +1856,30 @@ def run_layer3_relay(
         "relay_base": probe_base,
         "upstream": site["base_url"],
         "protocol": protocol,
-        "protocol_label": profile["label"],
+        "protocol_label": prof["label"],
         "relay_mode": "bridge" if bridge else "passthrough",
         "result": probe["result"],
         "detail": probe["detail"],
         "latency_ms": probe["latency_ms"],
         "facets": probe["facets"],
+        "http_status": probe["http_status"],
+        "interaction": probe,
+        "assess_family": plan_entry.get("assess_family") or fam,
+        "primary_agent": plan_entry.get("primary_agent", ""),
+        "profile": fam,
     }
 
 
-def print_layer3_relay(sid: str, site: dict[str, Any], result: dict[str, Any]) -> None:
+def print_layer3_relay(
+    sid: str, site: dict[str, Any], result: dict[str, Any], *, verbose: bool = False
+) -> None:
     print("Layer 3 — Relay wire probe (Agent → LiteLLM → source)")
+    if result.get("assess_family"):
+        primary = result.get("primary_agent", "")
+        extra = f" · primary: {primary}" if primary else ""
+        print(f"Model family: {result['assess_family']}{extra}")
+    elif result.get("profile"):
+        print(f"Model family: {result['profile']}")
     print(f"Site: {sid} ({site.get('name', sid)})")
     print(f"Protocol profile: {result['protocol']} ({result['protocol_label']})")
     print(f"Relay: {result['relay_base']}")
@@ -1238,18 +1891,42 @@ def print_layer3_relay(sid: str, site: dict[str, Any], result: dict[str, Any]) -
     else:
         print("Relay mode: passthrough (same wire to upstream)")
     print("")
-    print(f"{'Method':<6} {'Endpoint':<24} {'ms':<8} Result   Facets")
-    print("-" * 88)
+    print(f"{'Method':<6} {'Endpoint':<24} {'HTTP':<6} {'ms':<8} Result   Facets")
+    print("-" * 96)
     facets = result.get("facets") or {}
     facet_str = (
         f"shape={facets.get('shape','?')} "
         f"usage={facets.get('usage','?')} "
         f"stream={facets.get('stream','?')}"
     )
+    http_st = result.get("http_status", "—")
     print(
         f"{'POST':<6} {result['endpoint']:<24} "
-        f"{result.get('latency_ms', 0):<8} {result['result']:<8} {facet_str}"
+        f"{http_st!s:<6} {result.get('latency_ms', 0):<8} {result['result']:<8} {facet_str}"
     )
+    if not verbose and result.get("detail") and result["result"] != "OK":
+        print(f"  ↳ {result['detail'][:140]}")
+    interaction = result.get("interaction")
+    if verbose and interaction:
+        hop = (
+            "Agent → LiteLLM → source (passthrough)"
+            if result.get("relay_mode") == "passthrough"
+            else "Agent → LiteLLM → source (Codex bridge)"
+        )
+        auth_note = f"Authorization: Bearer (LiteLLM master_key sk-litellm-{sid})"
+        print("")
+        print("Protocol exchange (relay hop):")
+        print_wire_protocol_exchange(
+            result["model"],
+            result["wire"],
+            result["endpoint"],
+            interaction,
+            hop=hop,
+            auth_note=auth_note,
+        )
+        print(f"    Upstream target: {result['upstream']} (platform key via LiteLLM config)")
+    elif not verbose:
+        print("  (use --verbose for relay protocol exchange detail)")
     print("")
     verdict = "PASS" if result["pass"] else "FAIL"
     print(f"Layer 3 relay wire: {verdict}")
@@ -1264,8 +1941,11 @@ def cmd_probe_relay(args: argparse.Namespace, sites: dict[str, Any]) -> None:
     if not agent:
         raise SystemExit("--agent required for probe-relay")
     port = args.port if args.port else litellm_port(site)
-    result = run_layer3_relay(sid, site, agent, root, port=port)
-    print_layer3_relay(sid, site, result)
+    fam = assess_family_from_args(args) or resolve_family_for_site_agent(
+        sid, site, agent
+    )
+    result = run_layer3_relay(sid, site, agent, root, port=port, family=fam)
+    print_layer3_relay(sid, site, result, verbose=getattr(args, "verbose", False))
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
     if not result["pass"]:
@@ -1408,15 +2088,10 @@ def run_smoke_scenario_relay(
     agent: str,
     prompt: str,
     root: Path | None = None,
+    profile: str | None = None,
 ) -> tuple[str, float, int, dict[str, Any]]:
     """Run one smoke prompt via Agent main wire through LiteLLM relay."""
-    protocol, targets = assess_targets_for_site(site_id, site, root)
-    relay_target = relay_target_for_agent(targets, agent)
-    if not relay_target:
-        raise SystemExit(
-            f"No assess-plan layer2 target for agent {agent!r} under protocol {protocol}"
-        )
-    model, wire = relay_target
+    model, wire = relay_model_and_wire_for_agent(site_id, site, agent, root, profile)
     listen_port = litellm_port(site)
     key = litellm_master_key(site_id)
     probe_base = f"http://127.0.0.1:{listen_port}/v1"
@@ -1475,11 +2150,20 @@ def smoke_timeout_sec(root: Path | None = None) -> int:
         return 120
 
 
-def opencode_model_ref(site_id: str, root: Path | None = None) -> str:
+def opencode_model_ref(
+    site_id: str,
+    root: Path | None = None,
+    family: str | None = None,
+) -> str:
     plan = load_assess_plan(root)
-    models = layer3_models(site_id, {}, plan)
+    sites = load_sites(root)
+    _, site = site_entry(sites, site_id)
+    fam = family or resolve_family_for_site_agent(site_id, site, "opencode", plan)
+    models = layer3_models(site_id, site, plan, family=fam, profile=fam)
     model = models.get("opencode", "")
-    provider = opencode_provider(site_id, {}, plan).get("provider_id", "custom")
+    provider = opencode_provider(
+        site_id, site, plan, family=fam, profile=fam
+    ).get("provider_id", "custom")
     return f"{provider}/{model}"
 
 
@@ -1515,9 +2199,16 @@ def parse_opencode_json_output(text: str) -> str:
 
 
 def smoke_agent_command(
-    root: Path, site_id: str, agent: str, resolved: dict[str, Any]
+    root: Path,
+    site_id: str,
+    agent: str,
+    resolved: dict[str, Any],
+    family: str | None = None,
 ) -> list[str]:
-    base = [str(root / f"t_{agent}"), "--site", site_id, "-y", "--"]
+    base = [str(root / f"t_{agent}"), "--site", site_id, "-y"]
+    if family:
+        base.extend(["--family", family])
+    base.append("--")
     if agent == "claude":
         return base + [
             "--print",
@@ -1530,7 +2221,7 @@ def smoke_agent_command(
         if isinstance(argv, list) and argv:
             return base + [str(x) for x in argv]
         return base + ["exec", str(resolved["prompt"])]
-    model_ref = opencode_model_ref(site_id, root)
+    model_ref = opencode_model_ref(site_id, root, family=family)
     extra = resolved.get("opencode_args") or ["run", "--format", "json", "-m", model_ref]
     if isinstance(extra, list):
         cmd = base + [str(x) for x in extra]
@@ -1647,14 +2338,27 @@ def output_excerpt(text: str, limit: int = 240) -> str:
 
 
 def run_layer3_smoke(
-    site_id: str, agent: str, root: Path | None = None
+    site_id: str,
+    agent: str,
+    root: Path | None = None,
+    profile: str | None = None,
+    family: str | None = None,
 ) -> dict[str, Any]:
     root = root or repo_root()
     sites = load_sites(root)
     _, site = site_entry(sites, site_id)
+    fam = (
+        family
+        or profile
+        or resolve_family_for_site_agent(site_id, site, agent)
+    )
     scenarios = load_smoke_scenarios(site_id, root)
     smoke_mode = load_smoke_mode(root)
-    expected_model = layer3_models(site_id, site).get(agent, "")
+    expected_model = layer3_models(
+        site_id, site, profile=fam, family=fam
+    ).get(agent, "")
+    if fam:
+        print(f"Model family: {fam}")
     rows: list[dict[str, Any]] = []
     required_failed = 0
     optional_failed = 0
@@ -1705,7 +2409,7 @@ def run_layer3_smoke(
         if smoke_mode == "relay":
             try:
                 text, latency_ms, exit_code, meta = run_smoke_scenario_relay(
-                    site_id, site, agent, str(prompt), root
+                    site_id, site, agent, str(prompt), root, profile
                 )
                 output = text
                 eval_text = text
@@ -1731,7 +2435,7 @@ def run_layer3_smoke(
                 print(f"  [{sid}] FAIL ({req_mark}, {latency_ms} ms) — {reason}")
                 continue
         else:
-            cmd = smoke_agent_command(root, site_id, agent, resolved)
+            cmd = smoke_agent_command(root, site_id, agent, resolved, family=fam)
             try:
                 proc = subprocess.run(
                     cmd,
@@ -1872,8 +2576,11 @@ def cmd_run_smoke(args: argparse.Namespace, sites: dict[str, Any]) -> None:
     root = repo_root()
     sid, _site = site_entry(sites, args.site)
     agent = args.agent
-    ensure_litellm_proxy(sid)
-    result = run_layer3_smoke(sid, agent, root)
+    fam = assess_family_from_args(args) or resolve_family_for_site_agent(
+        sid, site, agent
+    )
+    ensure_litellm_proxy(sid, family=fam)
+    result = run_layer3_smoke(sid, agent, root, family=fam)
     print_layer3_smoke(result)
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1940,10 +2647,12 @@ def render_source_report(
     layer3: dict[str, Any],
     *,
     agent: str,
+    assess_family: str | None = None,
     smoke: str | None = None,
     layer3_smoke: dict[str, Any] | None = None,
     log_rel: str | None = None,
 ) -> str:
+    fam = assess_family or layer2.get("assess_family")
     test_summary = factual_test_summary(layer1, layer2, layer3, smoke=smoke)
     domain = site_domain_label(sid, site)
     anthropic_base = site.get(
@@ -1971,9 +2680,15 @@ def render_source_report(
         f"| **评估日期** | {day} |",
         f"| **测试结果** | `{test_summary}` |",
         "",
-        f"> **测试范围**：站点 `{sid}`；Layer 2 探测模型"
-        f" {', '.join(f'`{m}`' for m in models_tested) or '（无）'}；"
-        f"Layer 3 Agent `{agent}`"
+        f"> **测试范围**：站点 `{sid}`"
+        + (
+            f"；模型族 `{layer2.get('assess_family')}`"
+            f"（主 Agent `{layer2.get('primary_agent', '—')}`）"
+            if layer2.get("assess_family")
+            else ""
+        )
+        + f"；Layer 2 探测模型 {', '.join(f'`{m}`' for m in models_tested) or '（无）'}"
+        f"；Layer 3 Agent `{agent}`"
         + (f"；smoke_mode `{layer3_smoke.get('smoke_mode')}`" if layer3_smoke else "")
         + "。",
         "",
@@ -1984,7 +2699,13 @@ def render_source_report(
         "| 层 | 判定 | 说明 |",
         "|----|------|------|",
         f"| **1 平台链接** | {l1_verdict} | {layer1_summary_note(layer1)} |",
-        f"| **2 基础协议** | {l2_verdict} | profile `{layer2['protocol']}` |",
+        f"| **2 基础协议** | {l2_verdict} | "
+        + (
+            f"family `{layer2.get('assess_family')}` · transport `{layer2['protocol']}`"
+            if layer2.get("assess_family")
+            else f"transport `{layer2['protocol']}`"
+        )
+        + " |",
         f"| **3 指定 Agent** | {l3_verdict} | `{agent}` · relay_mode `{layer3['relay_mode']}` · "
         f"result `{layer3['result']}` |",
         f"| **4 smoke** | {smoke_verdict} | {smoke_summary_note(smoke, layer3_smoke)} |",
@@ -2134,9 +2855,13 @@ def render_source_report(
         "```bash",
         "cd experiment/user-side",
         "source .env",
-        f"python3 lib/maas.py assess-source --site {sid} --agent {agent} --write-report",
+        f"python3 lib/maas.py assess-source --site {sid}"
+        + (f" --family {fam}" if fam else "")
+        + f" --agent {agent} --write-report",
         "# 含 smoke：",
-        f"python3 lib/maas.py assess-source --site {sid} --agent {agent} --smoke --write-report",
+        f"python3 lib/maas.py assess-source --site {sid}"
+        + (f" --family {fam}" if fam else "")
+        + f" --agent {agent} --smoke --write-report",
         "```",
         "",
         "机器可读结果：`.runtime/` 下同日前缀 `*-assess-*.json`。",
@@ -2166,36 +2891,44 @@ def cmd_assess_source(args: argparse.Namespace, sites: dict[str, Any]) -> None:
     sid, site = site_entry(sites, args.site)
     agent = args.agent
     day = args.date or datetime.date.today().isoformat()
+    fam = assess_family_from_args(args) or resolve_family_for_site_agent(
+        sid, site, agent
+    )
 
-    protocol = resolve_protocol(sid, site)
-    if agent not in PROTOCOL_PROFILES[protocol]["agents"]:
-        in_scope = ", ".join(PROTOCOL_PROFILES[protocol]["agents"])
+    scope = agents_for_assess(sid, site, family=fam, profile=fam)
+    if agent not in scope:
         raise SystemExit(
-            f"Agent {agent!r} not in protocol scope for {sid!r} (in scope: {in_scope})"
+            f"Agent {agent!r} not in assess scope for {sid!r} "
+            f"(family={fam or 'default'}; in scope: {', '.join(scope)})"
         )
 
     key = api_key_for(site)
     failed = False
 
     print("========== Layer 1: Platform ==========")
+    verbose = getattr(args, "verbose", False)
     layer1 = run_layer1(sid, site, key)
-    print_layer1(sid, site, layer1)
+    print_layer1(sid, site, layer1, verbose=verbose)
     if not layer1["pass"]:
         failed = True
     print("")
 
     print("========== Layer 2: Protocol ==========")
-    layer2 = run_layer2(sid, site, key, root)
-    print_layer2(sid, site, layer2)
+    if fam:
+        print(f"(family={fam} — Layer 2 from assess-plan families.{fam})")
+    layer2 = run_layer2(sid, site, key, root, assess_family=fam)
+    print_layer2(sid, site, layer2, verbose=verbose)
     if not layer2["pass"]:
         failed = True
     print("")
 
     print(f"========== Layer 3: Agent ({agent}) ==========")
+    if fam:
+        print(f"(family={fam})")
     print("==> Starting LiteLLM relay")
-    ensure_litellm_proxy(sid)
-    layer3 = run_layer3_relay(sid, site, agent, root)
-    print_layer3_relay(sid, site, layer3)
+    ensure_litellm_proxy(sid, family=fam)
+    layer3 = run_layer3_relay(sid, site, agent, root, family=fam)
+    print_layer3_relay(sid, site, layer3, verbose=verbose)
     if not layer3["pass"]:
         failed = True
 
@@ -2204,7 +2937,7 @@ def cmd_assess_source(args: argparse.Namespace, sites: dict[str, Any]) -> None:
     if args.smoke:
         print("")
         print("==> Layer 3 smoke scenarios")
-        layer3_smoke = run_layer3_smoke(sid, agent, root)
+        layer3_smoke = run_layer3_smoke(sid, agent, root, family=fam)
         print_layer3_smoke(layer3_smoke)
         smoke_status = layer3_smoke.get("status")
         if smoke_status == "fail":
@@ -2219,6 +2952,7 @@ def cmd_assess_source(args: argparse.Namespace, sites: dict[str, Any]) -> None:
         "site_id": sid,
         "date": day,
         "agent": agent,
+        "assess_family": fam,
         "layer1": layer1,
         "layer2": layer2,
         "layer3": layer3,
@@ -2234,6 +2968,7 @@ def cmd_assess_source(args: argparse.Namespace, sites: dict[str, Any]) -> None:
         body = render_source_report(
             sid, site, day, layer1, layer2, layer3,
             agent=agent,
+            assess_family=fam,
             smoke=smoke_status,
             layer3_smoke=layer3_smoke,
             log_rel=args.out or None,
@@ -2272,6 +3007,32 @@ def cmd_assess_source(args: argparse.Namespace, sites: dict[str, Any]) -> None:
         raise SystemExit(1)
 
 
+def add_assess_verbose_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print protocol exchange detail (request/response envelope, facet notes)",
+    )
+
+
+def add_assess_family_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--family",
+        metavar="NAME",
+        dest="family",
+        help="assess-plan.json site families.<NAME> (gpt | anthropic | other)",
+    )
+    p.add_argument(
+        "--profile",
+        metavar="NAME",
+        help="Deprecated alias for --family",
+    )
+
+
+add_assess_profile_arg = add_assess_family_arg
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2287,17 +3048,22 @@ def build_parser() -> argparse.ArgumentParser:
         "base_url",
         "anthropic_base_url",
         "default_model",
+        "default_family",
         "notes",
         "litellm_master_key",
         "litellm_port",
         "litellm_relay_base",
         "protocol",
         "assess_agents",
+        "families",
+        "profiles",
+        "primary_agent",
         "opencode_provider_id",
         "opencode_model",
     ])
     p.add_argument("--site")
     p.add_argument("--agent", choices=["claude", "codex", "opencode"])
+    add_assess_profile_arg(p)
     p.set_defaults(func=cmd_get)
 
     p = sub.add_parser("list-models", help="List models from GET /v1/models")
@@ -2311,11 +3077,13 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--out", required=True)
         p.add_argument("--model")
         p.add_argument("--kind", default=kind)
+        add_assess_family_arg(p)
         p.set_defaults(func=cmd_write_config)
 
     p = sub.add_parser("assess-platform", help="Layer 1: platform link (GET /v1/models)")
     p.add_argument("--site", required=True)
     p.add_argument("--json", action="store_true", help="Also print JSON result")
+    add_assess_verbose_arg(p)
     p.set_defaults(func=cmd_assess_platform)
 
     p = sub.add_parser(
@@ -2324,12 +3092,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--site", required=True)
     p.add_argument("--json", action="store_true", help="Also print JSON result")
+    add_assess_verbose_arg(p)
+    add_assess_profile_arg(p)
     p.set_defaults(func=cmd_assess_protocol)
 
     p = sub.add_parser("write-litellm-config", help="Write LiteLLM proxy yaml for a site")
     p.add_argument("--site", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--port", type=int, default=0)
+    add_assess_profile_arg(p)
     p.set_defaults(func=cmd_write_litellm_config)
 
     p = sub.add_parser("probe-relay", help="Layer 3: probe Agent wire via LiteLLM")
@@ -2337,12 +3108,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent", required=True, choices=["claude", "codex", "opencode"])
     p.add_argument("--port", type=int, default=0)
     p.add_argument("--json", action="store_true", help="Also print JSON result")
+    add_assess_verbose_arg(p)
+    add_assess_profile_arg(p)
     p.set_defaults(func=cmd_probe_relay)
 
     p = sub.add_parser("run-smoke", help="Layer 3: Agent smoke scenarios via t_*")
     p.add_argument("--site", required=True)
     p.add_argument("--agent", required=True, choices=["claude", "codex", "opencode"])
     p.add_argument("--json", action="store_true", help="Also print JSON result")
+    add_assess_profile_arg(p)
     p.set_defaults(func=cmd_run_smoke)
 
     p = sub.add_parser(
@@ -2359,6 +3133,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--date", help="YYYY-MM-DD (default: today)")
     p.add_argument("--out", help="Optional log path hint embedded in report")
+    add_assess_verbose_arg(p)
+    add_assess_profile_arg(p)
     p.set_defaults(func=cmd_assess_source)
 
     p = sub.add_parser("report-path", help="Print docs/reports path for source assessment")

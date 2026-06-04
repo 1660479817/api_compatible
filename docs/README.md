@@ -43,7 +43,7 @@
 | 文档 | 说明 |
 |------|------|
 | [E2E原生兼容性全景.md](./research/E2E原生兼容性全景.md) | Agent 直连官方上游的兼容矩阵（研究基线） |
-| [LLM-API网关主流技术栈调研.md](./research/LLM-API网关主流技术栈调研.md) | LLM API 网关实现栈与 L2 探测 |
+| [LLM-API网关主流技术栈调研.md](./research/LLM-API网关主流技术栈调研.md) | LLM API 网关实现栈与 L2 探测（含 §5.6 Sub2API） |
 | [NewAPI技术栈全景.md](./research/NewAPI技术栈全景.md) | New API 单产品架构、Relay、Channel 与部署 |
 | [编程Agent模型转换插件调研.md](./research/编程Agent模型转换插件调研.md) | 网关 / 协议桥接方案地图（非 E4 实证） |
 

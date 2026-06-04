@@ -18,6 +18,9 @@ Options:
   --write-report    Write docs/reports/{domain}-源评估报告-{date}.md from results
   --out FILE        Tee stdout/stderr to FILE (shell wrapper only)
   --date DATE       Report date YYYY-MM-DD (default: today)
+  -v, --verbose     Print per-wire protocol exchange detail (Layer 1–3)
+  --family NAME     assess-plan families.<NAME> (gpt | anthropic | other)
+  --profile NAME    Deprecated alias for --family
   -h, --help
 
 Structured JSON is always written to .runtime/<site>-assess-<YYYYMMDD>.json
@@ -34,6 +37,8 @@ SMOKE=0
 WRITE_REPORT=0
 OUT=""
 DATE=""
+VERBOSE=0
+FAMILY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +48,8 @@ while [[ $# -gt 0 ]]; do
     --write-report) WRITE_REPORT=1; shift ;;
     --out) OUT="${2:-}"; shift 2 ;;
     --date) DATE="${2:-}"; shift 2 ;;
+    -v|--verbose) VERBOSE=1; shift ;;
+    --family|--profile) FAMILY="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -64,6 +71,8 @@ ARGS=(assess-source --site "$SITE" --agent "$AGENT")
 [[ "$SMOKE" -eq 1 ]] && ARGS+=(--smoke)
 [[ "$WRITE_REPORT" -eq 1 ]] && ARGS+=(--write-report)
 [[ -n "$DATE" ]] && ARGS+=(--date "$DATE")
+[[ "$VERBOSE" -eq 1 ]] && ARGS+=(--verbose)
+[[ -n "$FAMILY" ]] && ARGS+=(--family "$FAMILY")
 
 run_assess() {
   python3 "${ROOT}/lib/maas.py" "${ARGS[@]}"

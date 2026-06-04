@@ -30,8 +30,8 @@ LLM API 网关技术栈见 [research/LLM-API网关主流技术栈调研.md](../r
 python3 lib/maas.py report-path --site ai.oai.red --relative
 # → docs/reports/ai.oai.red-源评估报告-2026-06-04.md
 
-./scripts/assess-source.sh --site ai.oai.red --agent opencode --write-report
-# 自动生成同日报告 + .runtime/*-assess-*.json
+./scripts/assess-source.sh --site ai.oai.red --family gpt --agent codex --write-report
+# 单族站可省略 --family；自动生成同日报告 + .runtime/*-assess-*.json
 ```
 
 同一站点 **同日复测** 覆盖同名文件；**换日** 生成新文件，保留历史。
@@ -65,7 +65,7 @@ python3 lib/maas.py report-path --site ai.oai.red --relative
 ```bash
 cd experiment/user-side
 source .env
-./scripts/assess-source.sh --site <id> --agent <name> --write-report
+./scripts/assess-source.sh --site <id> --family <gpt|anthropic> --agent <name> --write-report
 ```
 
 2. 结构化 JSON：`.runtime/<site>-assess-<YYYYMMDD>.json`  

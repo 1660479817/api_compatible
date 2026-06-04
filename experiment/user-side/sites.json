@@ -27,6 +27,32 @@
         "gpt-5.5-openai-compact"
       ],
       "notes": "OpenAI-compatible relay; supported_models from vendor docs (not GET /v1/models)"
+    },
+    "sub2api.salus.icu": {
+      "name": "sub2api.salus.icu",
+      "report_domain": "sub2api.salus.icu",
+      "protocol": "openai",
+      "base_url": "https://sub2api.salus.icu/v1",
+      "anthropic_base_url": "https://sub2api.salus.icu",
+      "api_key_env": "SUB2API_SALUS_API_KEY",
+      "supported_models": [
+        "gpt-5.5",
+        "gpt-image-2"
+      ],
+      "notes": "Sub2API OpenAI-compatible relay; supported_models from GET /v1/models catalog (2026-06-04)"
+    },
+    "test_gpt_claude": {
+      "name": "Paratera MaaS (test_gpt_claude)",
+      "report_domain": "ai.paratera.com",
+      "protocol": "openai",
+      "base_url": "https://llmapi.paratera.com/v1",
+      "api_key_env": "TEST_GPT_CLAUDE_API_KEY",
+      "supported_models": [
+        "AWS-Claude-Opus-4.7",
+        "AWS-GPT-5.4",
+        "AWS-GPT-5.5"
+      ],
+      "notes": "Paratera OpenAI-compatible (llmapi.paratera.com/v1). Dual families: assess-plan families gpt|anthropic; CLI --family gpt|anthropic"
     }
   }
 }

@@ -6,6 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SITE=""
 PORT=0
+FAMILY=""
 
 usage() {
   cat <<'EOF'
@@ -22,6 +23,8 @@ Commands:
 Options:
   --site ID     Required. sites.json site id
   --port N      Override listen port (default: sites.json litellm.port or 4000)
+  --family NAME   assess-plan families.<NAME> for LiteLLM model_list
+  --profile NAME  Deprecated alias for --family
   -h, --help    Show this help
 EOF
 }
@@ -38,6 +41,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --port)
       PORT="${2:-0}"
+      shift 2
+      ;;
+    --family|--profile)
+      FAMILY="${2:-}"
       shift 2
       ;;
     start|stop|status|write-config)
@@ -86,6 +93,9 @@ write_config() {
   local args=(write-litellm-config --site "$SITE" --out "$CONFIG")
   if [[ "$PORT" -ne 0 ]]; then
     args+=(--port "$PORT")
+  fi
+  if [[ -n "$FAMILY" ]]; then
+    args+=(--family "$FAMILY")
   fi
   python3 "${ROOT}/lib/maas.py" "${args[@]}"
 }

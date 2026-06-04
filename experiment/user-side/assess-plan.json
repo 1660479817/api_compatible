@@ -1,9 +1,24 @@
 {
-  "description": "Per-site test plan: Layer 2 probe matrix + Layer 3 Agent/LiteLLM models + smoke scenarios. Does not describe site URLs — see sites.json.",
-  "protocol_profiles": {
-    "anthropic": "OpenCode + Claude Code → chat, messages",
-    "openai": "OpenCode + Codex → chat, responses",
-    "chat": "OpenCode only → chat"
+  "description": "Per-site test plan keyed by model family (Key + model id → primary Agent). URLs in sites.json.",
+  "model_families": {
+    "gpt": {
+      "label": "GPT / OpenAI",
+      "primary_agent": "codex",
+      "layer2_wires": ["chat", "responses"],
+      "layer3_agents": ["opencode", "codex"]
+    },
+    "anthropic": {
+      "label": "Anthropic / Claude",
+      "primary_agent": "claude",
+      "layer2_wires": ["chat", "messages"],
+      "layer3_agents": ["opencode", "claude"]
+    },
+    "other": {
+      "label": "Other (OpenCode probe)",
+      "primary_agent": "opencode",
+      "layer2_wires": ["chat"],
+      "layer3_agents": ["opencode"]
+    }
   },
   "wire_labels": {
     "chat": "POST /v1/chat/completions (OpenCode)",
@@ -12,6 +27,8 @@
   },
   "smoke_mode": "relay",
   "smoke_timeout_sec": 180,
+  "source_probe_timeout_sec": 120,
+  "relay_probe_timeout_sec": 180,
   "smoke_scenarios": [
     {
       "id": "model_probe",
@@ -67,18 +84,27 @@
   ],
   "sites": {
     "b.ai": {
-      "layer2": {
-        "targets": [
-          {"model": "kimi-k2.5", "wires": ["chat"]},
-          {"model": "claude-haiku-4.5", "wires": ["messages"]}
-        ]
+      "families": {
+        "anthropic": {
+          "models": ["claude-haiku-4.5"],
+          "layer3": {
+            "models": {
+              "claude": "claude-haiku-4.5",
+              "opencode": "claude-haiku-4.5"
+            }
+          }
+        },
+        "other": {
+          "models": ["kimi-k2.5"],
+          "layer3": {
+            "models": {
+              "opencode": "kimi-k2.5"
+            },
+            "agents": ["opencode"]
+          }
+        }
       },
       "layer3": {
-        "models": {
-          "claude": "claude-haiku-4.5",
-          "codex": "gpt-5-mini",
-          "opencode": "kimi-k2.5"
-        },
         "opencode": {
           "provider_id": "bai",
           "provider_name": "b.ai",
@@ -87,20 +113,67 @@
       }
     },
     "ai.oai.red": {
-      "layer2": {
-        "targets": [
-          {"model": "gpt-5.5", "wires": ["chat", "responses"]}
-        ]
+      "families": {
+        "gpt": {
+          "models": ["gpt-5.5"],
+          "layer3": {
+            "models": {
+              "codex": "gpt-5.5",
+              "opencode": "gpt-5.5"
+            },
+            "opencode": {
+              "provider_id": "oai-red",
+              "provider_name": "ai.oai.red",
+              "npm": "@ai-sdk/openai-compatible"
+            }
+          }
+        }
+      }
+    },
+    "sub2api.salus.icu": {
+      "families": {
+        "gpt": {
+          "models": ["gpt-5.5"],
+          "layer3": {
+            "models": {
+              "codex": "gpt-5.5",
+              "opencode": "gpt-5.5"
+            },
+            "opencode": {
+              "provider_id": "salus-sub2api",
+              "provider_name": "sub2api.salus.icu",
+              "npm": "@ai-sdk/openai-compatible"
+            }
+          }
+        }
+      }
+    },
+    "test_gpt_claude": {
+      "families": {
+        "gpt": {
+          "models": ["AWS-GPT-5.4", "AWS-GPT-5.5"],
+          "layer3": {
+            "models": {
+              "codex": "AWS-GPT-5.5",
+              "opencode": "AWS-GPT-5.5"
+            }
+          }
+        },
+        "anthropic": {
+          "primary_agent": "opencode",
+          "models": ["AWS-Claude-Opus-4.7"],
+          "layer3": {
+            "models": {
+              "opencode": "AWS-Claude-Opus-4.7"
+            },
+            "agents": ["opencode"]
+          }
+        }
       },
       "layer3": {
-        "models": {
-          "claude": "claude-haiku-4.5",
-          "codex": "gpt-5.5",
-          "opencode": "gpt-5.5"
-        },
         "opencode": {
-          "provider_id": "oai-red",
-          "provider_name": "ai.oai.red",
+          "provider_id": "paratera-test-gpt-claude",
+          "provider_name": "ai.paratera.com",
           "npm": "@ai-sdk/openai-compatible"
         }
       }

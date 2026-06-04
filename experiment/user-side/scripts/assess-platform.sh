@@ -4,6 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SITE=""
+VERBOSE=0
+EXTRA=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -12,12 +14,19 @@ while [[ $# -gt 0 ]]; do
 Usage: experiment/user-side/scripts/assess-platform.sh --site SITE
 
 Layer 1 — Platform link: GET /v1/models + catalog branch (listed | empty | unavailable).
+
+Options:
+  -v, --verbose   Print GET envelope / error detail
 EOF
       exit 0
       ;;
     --site)
       SITE="${2:-}"
       shift 2
+      ;;
+    -v|--verbose)
+      VERBOSE=1
+      shift
       ;;
     *)
       echo "Unknown argument: $1" >&2
@@ -35,4 +44,9 @@ if [[ -f "${ROOT}/.env" ]]; then
   set +a
 fi
 
-exec python3 "${ROOT}/lib/maas.py" assess-platform --site "$SITE"
+[[ "$VERBOSE" -eq 1 ]] && EXTRA+=(--verbose)
+if ((${#EXTRA[@]})); then
+  exec python3 "${ROOT}/lib/maas.py" assess-platform --site "$SITE" "${EXTRA[@]}"
+else
+  exec python3 "${ROOT}/lib/maas.py" assess-platform --site "$SITE"
+fi

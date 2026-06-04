@@ -9,7 +9,7 @@
 | 文件 | 职责 |
 |------|------|
 | [`sites.json`](./sites.json) | **描述站点**：URL、`protocol`、文档模型列表、`api_key_env` |
-| [`assess-plan.json`](./assess-plan.json) | **描述测什么**：Layer 2 探测矩阵、Layer 3 模型与 smoke 场景 |
+| [`assess-plan.json`](./assess-plan.json) | **描述测什么**：模型族 `families`、Layer 2 wire、Layer 3 模型与 smoke |
 | [`.env`](./.env.example) | API Key（Git 忽略；变量名对齐 `api_key_env`） |
 
 协作与 Git 规则：[AGENTS.md](./AGENTS.md)
@@ -43,11 +43,14 @@ LiteLLM 配置由 `maas.py write-litellm-config` 按站点生成，落在 `.runt
 | Claude Code | `POST /v1/messages` | Messages 直通 |
 | Codex | `POST /v1/responses` | 缺 Responses 的源上 **桥接** 为 Chat |
 
-Layer 3 默认只跑 **`protocol` profile 内** 的 Agent：
+**模型族 → 主 Agent**（见 [`CONFIG.md`](./CONFIG.md)）：`gpt` → Codex，`anthropic` → Claude Code；**OpenCode** 为各族通用 chat 探针。
 
 ```bash
-python3 lib/maas.py get assess_agents --site ai.oai.red
-# openai profile → opencode,codex
+python3 lib/maas.py get families --site test_gpt_claude
+# anthropic,gpt
+
+python3 lib/maas.py get assess_agents --site ai.oai.red --family gpt
+# opencode,codex
 ```
 
 ---
@@ -71,14 +74,14 @@ cd experiment/user-side
 cp .env.example .env          # 填写 sites.json 中 api_key_env 对应密钥
 source .env
 
-# 一键：Layer 1 + 2 + 3，写报告 + JSON
-./scripts/assess-source.sh --site ai.oai.red --agent opencode --smoke --write-report
+# GPT 族一键：L1–2 + OpenCode 探针 + Codex（单族站可省略 --family）
+./scripts/assess-family.sh --site ai.oai.red --family gpt --smoke --write-report
 ```
 
 等价于：
 
 ```bash
-python3 lib/maas.py assess-source --site ai.oai.red --agent opencode --smoke --write-report
+python3 lib/maas.py assess-source --site ai.oai.red --family gpt --agent codex --smoke --write-report
 ```
 
 **产出**：
@@ -104,7 +107,7 @@ python3 lib/maas.py report-path --site ai.oai.red --relative
 | 层 | 名称 | 拓扑 | 脚本 | 判定依据 |
 |----|------|------|------|----------|
 | **1** | 平台链接 | 直打源 | `assess-platform.sh` | `GET /v1/models`；catalog 分支 `listed` / `empty` / `unavailable`；与 `supported_models` 对照 |
-| **2** | 基础协议 | 直打源 | `assess-protocol.sh` | `assess-plan` → `layer2.targets` 各 model × wire；记录 `shape` / `usage` / `stream` |
+| **2** | 基础协议 | 直打源 | `assess-protocol.sh` | `families.<name>.models` × wire；记录 `shape` / `usage` / `stream` |
 | **3** | 指定 Agent | 源 → LiteLLM → Agent | `run-source-agent-test.sh` | relay wire probe；可选 smoke（`assess-plan` → `smoke_scenarios`） |
 | **3+** | smoke（可选） | 同上或 `t_*` | `--smoke` | `smoke_mode`: `relay`（默认，HTTP 经 LiteLLM）或 `agent`（完整 Agent CLI） |
 
@@ -114,17 +117,17 @@ python3 lib/maas.py report-path --site ai.oai.red --relative
 
 ```bash
 ./scripts/assess-platform.sh --site ai.oai.red
-./scripts/assess-protocol.sh --site ai.oai.red
-./scripts/run-source-agent-test.sh --site ai.oai.red --agent opencode --probe-only
-./scripts/run-source-agent-test.sh --site ai.oai.red --agent opencode --smoke
+./scripts/assess-protocol.sh --site ai.oai.red --family gpt
+./scripts/run-source-agent-test.sh --site ai.oai.red --family gpt --agent codex --probe-only
+./scripts/run-source-agent-test.sh --site ai.oai.red --family gpt --agent codex --smoke
 ```
 
-**批量**（Layer 1–2 一次 + protocol 内多 Agent Layer 3）：
+**批量**（Layer 1 一次；Layer 2–3 按族或 `--agents`）：
 
 ```bash
 ./scripts/run-user-side-compat.sh --site b.ai --layers-12
-./scripts/run-user-side-compat.sh --site b.ai --probe-only
-./scripts/run-user-side-compat.sh --site b.ai --smoke --agents claude,opencode
+./scripts/run-user-side-compat.sh --site b.ai --family anthropic --smoke
+./scripts/run-user-side-compat.sh --site b.ai --family other --smoke --agents opencode
 ```
 
 ---
@@ -144,11 +147,12 @@ experiment/user-side/
 ├── scripts/
 │   ├── assess-platform.sh      # Layer 1
 │   ├── assess-protocol.sh      # Layer 2
-│   ├── assess-source.sh        # Layer 1–3 一键 + --write-report
+│   ├── assess-family.sh        # 一族 L1–2 + 族内多 Agent L3
+│   ├── assess-source.sh        # 单 Agent Layer 1–3 + --write-report
 │   ├── run-source-agent-test.sh # Layer 3
 │   ├── run-user-side-compat.sh  # 批量
 │   └── litellm-proxy.sh        # LiteLLM 启停
-├── t_claude / t_codex / t_opencode   # Agent 非交互启动器（smoke_mode=agent）
+├── t_claude / t_codex / t_opencode   # Agent 启动器（`--family` 可省略，按 Agent 推断）
 └── .runtime/               # 生成物与 JSON 证据（Git 忽略）
 ```
 
@@ -158,7 +162,8 @@ experiment/user-side/
 
 | 脚本 | 作用 |
 |------|------|
-| `assess-source.sh` | **推荐入口**：Layer 1–3；`--smoke`；`--write-report` |
+| `assess-family.sh` | **按族批量**：L1–2 + 族内各 Agent L3；默认 `--smoke` |
+| `assess-source.sh` | 单 Agent 全层；`--smoke`；`--write-report` |
 | `assess-platform.sh` | 仅 Layer 1 |
 | `assess-protocol.sh` | 仅 Layer 2 |
 | `run-source-agent-test.sh` | 仅 Layer 3（`--probe-only` / `--smoke`） |
@@ -174,7 +179,9 @@ experiment/user-side/
 | 命令 | 说明 |
 |------|------|
 | `list-sites` | 列出 `sites.json` 站点 id |
-| `get assess_agents --site <id>` | 该站 protocol 内 Agent 列表 |
+| `get families --site <id>` | 该站模型族列表 |
+| `get default_family --site <id> --agent <name>` | 推断模型族（`gpt` / `anthropic` / …） |
+| `get assess_agents --site <id> [--family NAME]` | 该族或全站 Layer 3 Agent 列表 |
 | `get default_model --site <id> --agent <name>` | Layer 3 默认 model |
 | `list-models --site <id>` | 直打源 `GET /v1/models` |
 | `assess-platform --site <id>` | Layer 1（`--json` 输出 JSON） |
@@ -191,8 +198,36 @@ experiment/user-side/
 
 | 站点 id | protocol | 说明 |
 |---------|----------|------|
-| `b.ai` | `anthropic` | Chat + Messages；无 `/v1/responses`（Codex 需桥接或跳过） |
-| `ai.oai.red` | `openai` | OpenAI-compatible；Layer 2 默认测 `gpt-5.5` × chat/responses |
+| `b.ai` | `anthropic` | 族 `anthropic`（Claude Code）+ `other`（Kimi，仅 OpenCode） |
+| `ai.oai.red` | `openai` | 族 `gpt`：`gpt-5.5` → Codex + OpenCode 探针 |
+| `sub2api.salus.icu` | `openai` | 族 `gpt`：`gpt-5.5` |
+| `test_gpt_claude` | `openai` | 族 `gpt` + `anthropic`（[Paratera](https://ai.paratera.com/)） |
+
+### Paratera（`test_gpt_claude`）双族
+
+**Layer 1 一次**；Layer 2–3 用 **`--family`**（`--profile` 为同义别名）：
+
+| family | 主 Agent | Layer 3 | 说明 |
+|--------|----------|---------|------|
+| `gpt` | Codex | OpenCode + Codex | `chat` + `responses` |
+| `anthropic` | Claude Code（若仅有 chat 面则 N/A） | OpenCode | Claude 模型经 chat；不跑 Claude Code 除非有 Messages |
+
+```bash
+cd experiment/user-side && source .env
+
+./scripts/assess-platform.sh --site test_gpt_claude
+
+./scripts/assess-protocol.sh --site test_gpt_claude --family gpt
+./scripts/assess-source.sh --site test_gpt_claude --family gpt --agent codex --write-report
+
+./scripts/assess-protocol.sh --site test_gpt_claude --family anthropic
+./scripts/assess-source.sh --site test_gpt_claude --family anthropic --agent opencode --write-report
+
+./scripts/assess-family.sh --site test_gpt_claude --family gpt --smoke
+./scripts/assess-family.sh --site test_gpt_claude --family anthropic --smoke
+```
+
+详情见 [CONFIG.md](./CONFIG.md)。
 
 新增站点：编辑 `sites.json` + `assess-plan.json` → `.env` 补密钥 → 跑 `assess-source` → 更新 [`docs/reports/README.md`](../../docs/reports/README.md) 索引。
 
