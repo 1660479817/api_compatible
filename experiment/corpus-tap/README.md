@@ -32,28 +32,53 @@ Agent  ──►  corpus-tap :8443  ──►  new-api :3000  ──►  上游
 
 ## 快速开始（本地开发）
 
-**前提**：本机可访问 New API（或先用 mock，见 [测试](#测试)）。
+**前提**：本机可访问 New API（或 `make smoke`）；PostgreSQL 用于元数据（分析依赖同库）。
+
+### 1. 配置
 
 ```bash
 cd experiment/corpus-tap
 cp .env.example .env
+# 分析（可选）：cp analysis/profile/.env.example .env.profile 并合并 LLM 变量
 ```
 
-编辑 `.env`，至少设置：
+`.env` 至少：
 
 ```bash
 CORPUS_TAP_UPSTREAM=http://127.0.0.1:3000
-CORPUS_TAP_DEV_USER_ID=1          # 开发期：所有 Token 记到该用户
+CORPUS_TAP_DATABASE_URL=postgres://corpus:corpus@127.0.0.1:5433/corpus?sslmode=disable
+CORPUS_TAP_DEV_USER_ID=1
 CORPUS_TAP_LOCAL_DATA_DIR=./data
 ```
 
-启动：
+### 2. 首次建库
 
 ```bash
-go mod tidy
+make db-reset           # 空库或复位：migrations/schema.sql，见 migrations/README.md
+```
+
+### 3. 启动 Tap
+
+```bash
 make build
 export $(grep -v '^#' .env | xargs)
 ./bin/corpus-tap
+```
+
+### 4. 启动分析（可选，需 LiteLLM）
+
+```bash
+make build-profile
+export CORPUS_PROFILE_LLM_BASE=http://127.0.0.1:4000
+export CORPUS_PROFILE_LLM_API_KEY=sk-operator-analysis
+export CORPUS_PROFILE_DATABASE_URL="$CORPUS_TAP_DATABASE_URL"
+./bin/corpus-profile
+```
+
+无 Tap / Docker 时，可用种子数据跑通 Profile 批处理（需本机 Postgres + LiteLLM）：
+
+```bash
+make db-reset dev-local
 ```
 
 另开终端发一条推理（示例）：
@@ -80,12 +105,17 @@ curl -sS -X POST http://127.0.0.1:8443/v1/messages \
 | 长流式 | `CORPUS_TAP_SSE_SPOOL_DIR` + `CORPUS_TAP_SSE_SPOOL_MEM_BYTES` |
 | 旁路 | 紧急时 `CORPUS_TAP_MODE=proxy-only`（只转发，不采） |
 
-数据库初始化：
+数据库初始化或复位：
 
 ```bash
-psql "$CORPUS_TAP_DATABASE_URL" -f migrations/001_init.sql
-# 若库是旧版 001，再执行：
-psql "$CORPUS_TAP_DATABASE_URL" -f migrations/002_storage_extensions.sql
+export CORPUS_TAP_DATABASE_URL=postgres://corpus:corpus@127.0.0.1:5432/corpus?sslmode=disable
+make db-reset
+```
+
+本地 Homebrew Postgres 若应用用户不能 `DROP DATABASE`，可设超级用户连接（见 [`migrations/README.md`](./migrations/README.md)）：
+
+```bash
+export CORPUS_TAP_DATABASE_ADMIN_URL="postgres://$(whoami)@127.0.0.1:5432/postgres"
 ```
 
 合并到中转站 Compose：[`deploy/docker-compose.snippet.yml`](./deploy/docker-compose.snippet.yml)（对外 **8443**）。
@@ -156,6 +186,8 @@ curl -sS -H "X-Corpus-Admin-Key: $CORPUS_TAP_ADMIN_KEY" \
 | `make test` | 单元测试 + **mock 上游 E2E**（无需 Docker / New API） |
 | `make test-integration` | MySQL `tokens` 表解析（需 `127.0.0.1:13306` 或 `CORPUS_TAP_TEST_MYSQL_DSN`） |
 | `make smoke` | Docker 全栈：mock New API + MySQL + PG + 一次真实 POST |
+| `make dev-seed` | 写入一条 `http_exchange` + `./data` 样例 blob |
+| `make dev-local` | `dev-seed` + 启动 `corpus-profile` 跑一轮 `/internal/run` |
 
 New API 版本与表结构约定：[`testdata/NEWAPI_BASELINE.md`](./testdata/NEWAPI_BASELINE.md)
 
@@ -165,8 +197,10 @@ New API 版本与表结构约定：[`testdata/NEWAPI_BASELINE.md`](./testdata/NE
 
 | 文档 | 内容 |
 |------|------|
-| [**DESIGN.md**](./DESIGN.md) | 采集 + 存储 **完整设计**（规则、表结构、导出契约、验收） |
+| [**DESIGN.md**](./DESIGN.md) | **采集 + 存储**（`corpus-tap`，规则、表结构、导出契约） |
+| [**analysis/ARCHITECTURE.md**](./analysis/ARCHITECTURE.md) | **分析层**（多策略架构；与 Tap 分界） |
+| [**analysis/profile/DESIGN.md**](./analysis/profile/DESIGN.md) | 策略 **profile**（`corpus-profile`，Stage1/2） |
 | [中转站语料采集插件设计](../../docs/experiment/中转站语料采集插件设计.md) | 实验点索引、Compose、G2 出站、画像扩展槽 |
 | [AGENTS.md](../../AGENTS.md) | 仓库协作与复审触发 |
 
-实现状态：**采集与存储 S0–S5 已完成**（详见 DESIGN §15）。画像 Worker 目录 `profile/` 为占位，未实现。
+实现状态：**L0 采集存储 S0–S5** · **L1 Profile 策略 P0–P1** · **L2 金库视图**（[`analysis/ARCHITECTURE.md`](./analysis/ARCHITECTURE.md)）。建库：`make db-reset`；分析：`make build-profile`。

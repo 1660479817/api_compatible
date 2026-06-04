@@ -24,10 +24,11 @@ type BlobKey struct {
 	DT           time.Time
 }
 
-// BlobBackend writes gzip objects (local file:// or s3://).
+// BlobBackend writes/reads gzip objects (local file:// or s3://).
 type BlobBackend interface {
 	Ping(ctx context.Context) error
 	WriteGzip(ctx context.Context, key BlobKey, plaintext []byte) (BlobRef, error)
+	ReadPlaintext(ctx context.Context, uri string) ([]byte, error)
 }
 
 func NewBlobBackend(cfg config.Config) (BlobBackend, error) {

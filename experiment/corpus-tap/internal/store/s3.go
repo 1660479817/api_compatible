@@ -7,6 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"strings"
 
 	"corpus-tap/internal/config"
 
@@ -80,4 +82,32 @@ func (b *s3Backend) WriteGzip(ctx context.Context, key BlobKey, plaintext []byte
 	}
 	uri := fmt.Sprintf("s3://%s/%s", b.bucket, objectKey)
 	return BlobRef{URI: uri, SHA256: sha, Bytes: int64(len(plaintext))}, nil
+}
+
+func (b *s3Backend) ReadPlaintext(ctx context.Context, uri string) ([]byte, error) {
+	if !strings.HasPrefix(uri, "s3://") {
+		return nil, fmt.Errorf("not an s3 uri: %s", uri)
+	}
+	parts := strings.SplitN(uri[5:], "/", 2)
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid s3 uri: %s", uri)
+	}
+	bucket, key := parts[0], parts[1]
+
+	resp, err := b.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	gr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	defer gr.Close()
+
+	return io.ReadAll(gr)
 }

@@ -56,7 +56,7 @@
 
 | 下游 | 读什么 | Tap 必须保证 |
 |------|--------|----------------|
-| **语料清洗 / SFT** | `client_request` + `upstream_response` 或 `assembled_stream` | 按 `user_id`+时间批量列出；URI 可解析；流式可还原 |
+| **语料清洗 / SFT** | `client_request` + `upstream_response` 或 `assembled_stream`（SSE 原始） | 按 `user_id`+时间列出；URI 可解析；**语义还原在分析层** |
 | **画像（未来）** | 上列 + `http_exchange` 聚合统计 | 元数据足够做确定性 `stats`；`sample_exchange_ids` 由 Worker 填，非 Tap |
 | **分析（未来）** | 同上 + 可选异步 enrich 字段 | `enrich_json` 可补 `channel_id`、token 数等，不阻塞转发 |
 
@@ -128,22 +128,16 @@ sequenceDiagram
 
 ```text
 experiment/corpus-tap/
-├── cmd/corpus-tap/          # 入口
+├── cmd/corpus-tap/              # L0 入口
+├── cmd/corpus-profile/          # L1 profile 策略
 ├── internal/
-│   ├── proxy/               # 反向代理、捕获编排、健康检查
-│   ├── rules/               # R1–R3、R5–R7 判定
-│   ├── enrich/              # Token → user_id / token_id
-│   ├── capture/             # Record 组装、触发 Persist
-│   ├── redact/              # R4 脱敏
-│   ├── store/
-│   │   ├── local.go         # file:// 布局
-│   │   ├── s3.go            # 【待实现】
-│   │   └── postgres.go      # 元数据
-│   └── config/
-├── migrations/
-│   ├── 001_init.sql         # 已实现
-│   └── 002_storage_extensions.sql  # 长期字段（待应用）
-└── profile/                 # 【扩展槽，空目录】画像 Worker，不纳入本文
+│   ├── proxy/ capture/ enrich/ rules/ redact/   # 仅 Tap
+│   ├── store/                   # 事实层 + analysis_profile.go
+│   ├── analysis/shared/         # 闸门、SSE
+│   ├── analysis/profile/        # profile 策略
+│   └── config/                  # Load() / LoadProfile()
+├── analysis/                    # 架构与各策略 DESIGN
+└── migrations/schema.sql          # 全量建库，见 migrations/README.md
 ```
 
 | 包 | 职责 |
@@ -278,13 +272,15 @@ Tap **不** 解析 chat 轮次。
 | 模式 | 存储对象 | 说明 |
 |------|----------|------|
 | **非流式** | `upstream_response.json.gz` | 完整响应 body |
-| **流式** | `assembled_stream.txt.gz` | 缓冲全部 SSE 直至 `data: [DONE]` 或连接关闭；**同时** 可选 `upstream_response_raw.json.gz` 存原始 chunk 序列（`CORPUS_TAP_STORE_SSE_RAW=true`） |
+| **流式** | `assembled_stream.txt.gz` | **tee 捕获的原始 SSE 字节流**（与转发给客户端的 chunk 序列一致）；**不是**已重组的纯文本对话 |
+| **可选** | `upstream_sse_raw.json.gz` | `CORPUS_TAP_STORE_SSE_RAW=true` 时与上同源（实现别名） |
+
+**与分析层分工（定稿）**：Tap **只保证字节完整、可审计**；将 SSE 解析为助手可读文本由分析层 [`internal/analysis/shared/sse.go`](./internal/analysis/shared/sse.go) 完成。下游不得假设 `assembled_stream` 可直接做 SFT/RAG。
 
 ### 9.3 转发与内存
 
-- 理想：**tee** 到客户端 + 组装缓冲（P1 实现目标）。  
-- 骨架：整包读响应（仅适合短流）；生产须 **边读边写** 客户端 + **spool 文件**（超 `CORPUS_TAP_SSE_SPOOL_BYTES` 阈值落盘）。  
-- 单流上限默认 **64MiB**（`CORPUS_TAP_MAX_STREAM_BYTES`），超限截断并 `truncated=true`。
+- 实现：**tee** 到客户端 + 内存/spool 捕获（见 `internal/proxy/stream.go`）。  
+- 超 `CORPUS_TAP_SSE_SPOOL_MEM_BYTES` 可落盘 spool；单流上限 `CORPUS_TAP_MAX_STREAM_BYTES`，超限 `truncated=true`。
 
 ---
 
@@ -292,16 +288,14 @@ Tap **不** 解析 chat 轮次。
 
 ### 10.1 PostgreSQL
 
-**001**（已存在）：`tap_deployment`、`http_exchange` 核心列 — 见 [`migrations/001_init.sql`](./migrations/001_init.sql)。
-
-**002**（长期字段）：见 [`migrations/002_storage_extensions.sql`](./migrations/002_storage_extensions.sql)。
+全量 DDL：[`migrations/schema.sql`](./migrations/schema.sql)。
 
 | 表 | 用途 |
 |----|------|
 | `tap_deployment` | 每次进程启动可插入一行，或复用 `CORPUS_TAP_DEPLOYMENT_ID` 固定 UUID |
-| `http_exchange` | 一次 HTTP 交换一行；画像/分析 **只读** |
+| `http_exchange` | 一次 HTTP 交换一行；分析 **只读** |
 
-### 10.2 `http_exchange` 字段语义（001 + 002）
+### 10.2 `http_exchange` 字段语义
 
 | 列 | 阶段 | 说明 |
 |----|------|------|
@@ -505,9 +499,11 @@ s3://<bucket>/<deployment_id>/user_id=<uid>/dt=YYYY-MM-DD/<exchange_id>/
 
 | 槽位 | 路径 / 迁移 | 说明 |
 |------|-------------|------|
-| 画像 Worker | `profile/`、`migrations/003_profile.sql`（待建） | `profile_run`、`user_profile`；桶前缀 `profiles/` |
-| 分析 Worker | `analytics/`（待建） | 规则/报表；结果写 `analytics/` 前缀或独立表 |
-| 契约索引 | [`docs/experiment/中转站语料采集插件设计.md`](../../docs/experiment/中转站语料采集插件设计.md) §8 | 画像 LLM 出站、Compose `corpus-profile` |
+| 分析层 | [`analysis/ARCHITECTURE.md`](./analysis/ARCHITECTURE.md) | 多策略只读事实层；共享 `internal/analysis/shared` |
+| 策略 profile | [`analysis/profile/DESIGN.md`](./analysis/profile/DESIGN.md) | `corpus-profile`：`internal/analysis/profile/` |
+| 金库出口（L2） | [`migrations/schema.sql`](./migrations/schema.sql) 视图 | `v_gold_rag_chunks`、`v_gold_sft_candidates` |
+| 其他策略 | `analysis/<id>/` + 独立表或 `unified_conclusions` | 见 [`analysis/ARCHITECTURE.md`](./analysis/ARCHITECTURE.md) §5 |
+| 契约索引 | [`docs/experiment/中转站语料采集插件设计.md`](../../docs/experiment/中转站语料采集插件设计.md) §2 | Compose、G2 出站 |
 
 **约束**：扩展 Worker **不得** import `proxy`；**不得** 使用 `CORPUS_TAP_UPSTREAM` 或用户 Bearer。
 
@@ -529,4 +525,4 @@ s3://<bucket>/<deployment_id>/user_id=<uid>/dt=YYYY-MM-DD/<exchange_id>/
 ## 参考
 
 - New API `model/token.go`、`model/log.go`（只读 enrich 对照）  
-- [`migrations/001_init.sql`](./migrations/001_init.sql)、[`migrations/002_storage_extensions.sql`](./migrations/002_storage_extensions.sql)
+- [`migrations/schema.sql`](./migrations/schema.sql)

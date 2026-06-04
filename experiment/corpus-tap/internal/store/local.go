@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -57,6 +58,32 @@ func (b *localBackend) WriteGzip(ctx context.Context, key BlobKey, plaintext []b
 		SHA256: hex.EncodeToString(sum[:]),
 		Bytes:  int64(len(plaintext)),
 	}, nil
+}
+
+func (b *localBackend) ReadPlaintext(ctx context.Context, uri string) ([]byte, error) {
+	path := ""
+	if _, err := fmt.Sscanf(uri, "file://%s", &path); err != nil {
+		return nil, fmt.Errorf("invalid file uri: %w", err)
+	}
+	// Use Sscanf carefully with file://, it might be better to just trim prefix
+	if !bytes.HasPrefix([]byte(uri), []byte("file://")) {
+		return nil, fmt.Errorf("not a file uri: %s", uri)
+	}
+	path = uri[7:]
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer gr.Close()
+
+	return io.ReadAll(gr)
 }
 
 func localKey(deploymentID string, userID int, exchangeID, role string) BlobKey {
