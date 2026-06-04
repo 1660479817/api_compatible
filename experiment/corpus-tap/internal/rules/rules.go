@@ -39,11 +39,4 @@ func WireFormat(path string) string {
 	}
 }
 
-func IsStreamRequest(r *http.Request, body []byte) bool {
-	if strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream") {
-		return true
-	}
-	// lightweight check for "stream":true in JSON bodies
-	lower := strings.ToLower(string(body))
-	return strings.Contains(lower, `"stream":true`) || strings.Contains(lower, `"stream": true`)
-}
+// IsStreamRequest is defined in stream.go.

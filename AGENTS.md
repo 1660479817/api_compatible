@@ -56,7 +56,8 @@
 - [docs/research/LLM-API网关主流技术栈调研.md](./docs/research/LLM-API网关主流技术栈调研.md)（主流网关大版本或新增站点 E3 时复审）
 - [docs/experiment/EC2-用户侧隔离实验点设计.md](./docs/experiment/EC2-用户侧隔离实验点设计.md)（Runner 拓扑、凭据模式或用户侧出站策略变更时复审）
 - [docs/experiment/EC2-中转站原型实验点设计.md](./docs/experiment/EC2-中转站原型实验点设计.md)（New API 原型、Channel/Token 交付或网关侧出站策略变更时复审）
-- [docs/experiment/中转站语料采集插件设计.md](./docs/experiment/中转站语料采集插件设计.md)（Corpus Tap 采集规则、存储、插上即用契约或 **Profile Analyzer 独立 LLM 契约** 变更时复审）
+- [experiment/corpus-tap/DESIGN.md](./experiment/corpus-tap/DESIGN.md)（Corpus Tap **采集+存储** 契约变更时复审；索引见 [中转站语料采集插件设计](./docs/experiment/中转站语料采集插件设计.md)）
+- [docs/experiment/中转站语料采集插件设计.md](./docs/experiment/中转站语料采集插件设计.md)（部署拓扑、G2、**Profile Analyzer** 扩展槽变更时复审）
 - [experiment/user-side/AGENTS.md](./experiment/user-side/AGENTS.md)（启动器或站点登记变更时）
 - [experiment/user-side/CONFIG.md](./experiment/user-side/CONFIG.md)（sites / assess-plan 分工变更时）
 - [docs/reports/README.md](./docs/reports/README.md)（报告索引与样例结论）

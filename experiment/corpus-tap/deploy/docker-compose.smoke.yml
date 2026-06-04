@@ -1,0 +1,66 @@
+# P1 smoke stack: mock New API + MySQL (tokens) + PostgreSQL + corpus-tap
+# Usage: docker compose -f deploy/docker-compose.smoke.yml up -d --wait && ./scripts/smoke.sh
+
+services:
+  mock-newapi:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.mock-newapi
+    ports:
+      - "13000:3000"
+
+  mysql-newapi:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: corpus
+      MYSQL_DATABASE: newapi
+    ports:
+      - "13306:3306"
+    volumes:
+      - ../testdata/newapi_mysql_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pcorpus"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  corpus-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: corpus
+      POSTGRES_PASSWORD: corpus
+      POSTGRES_DB: corpus
+    ports:
+      - "15433:5432"
+    volumes:
+      - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U corpus -d corpus"]
+      interval: 3s
+      retries: 15
+
+  corpus-tap:
+    build: ..
+    ports:
+      - "18443:8443"
+    environment:
+      CORPUS_TAP_UPSTREAM: http://mock-newapi:3000
+      CORPUS_TAP_DATABASE_URL: postgres://corpus:corpus@corpus-db:5432/corpus?sslmode=disable
+      CORPUS_TAP_LOCAL_DATA_DIR: /data
+      CORPUS_TAP_NEWAPI_MYSQL_DSN: root:corpus@tcp(mysql-newapi:3306)/newapi?parseTime=true
+      CORPUS_TAP_DEPLOYMENT_ID: 00000000-0000-0000-0000-00000000c0de
+      CORPUS_TAP_SSE_SPOOL_DIR: /tmp/corpus-spool
+      CORPUS_TAP_ADMIN_KEY: smoke-admin
+      CORPUS_TAP_NEWAPI_DIGEST: ${CORPUS_TAP_NEWAPI_DIGEST:-local-smoke}
+    volumes:
+      - corpus-smoke-data:/data
+    depends_on:
+      mock-newapi:
+        condition: service_started
+      mysql-newapi:
+        condition: service_healthy
+      corpus-db:
+        condition: service_healthy
+
+volumes:
+  corpus-smoke-data:

@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -10,44 +12,59 @@ import (
 	"time"
 )
 
-type LocalBlob struct {
-	URI   string
-	SHA256 string
-	Bytes int64
+type localBackend struct {
+	baseDir string
 }
 
-func WriteLocalGzip(baseDir, deploymentID string, userID int, exchangeID, role string, data []byte) (LocalBlob, error) {
-	if baseDir == "" {
-		return LocalBlob{}, fmt.Errorf("local data dir not configured")
+func (b *localBackend) Ping(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
-	dt := time.Now().UTC().Format("2006-01-02")
-	dir := filepath.Join(baseDir, deploymentID, fmt.Sprintf("user_id=%d", userID), "dt="+dt, exchangeID)
+	return os.MkdirAll(b.baseDir, 0o750)
+}
+
+func (b *localBackend) WriteGzip(ctx context.Context, key BlobKey, plaintext []byte) (BlobRef, error) {
+	select {
+	case <-ctx.Done():
+		return BlobRef{}, ctx.Err()
+	default:
+	}
+	if b.baseDir == "" {
+		return BlobRef{}, fmt.Errorf("local data dir not configured")
+	}
+	dir := filepath.Join(b.baseDir, objectPrefix(key))
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return LocalBlob{}, err
+		return BlobRef{}, err
 	}
-	name := role + ".json.gz"
-	path := filepath.Join(dir, name)
-	f, err := os.Create(path)
-	if err != nil {
-		return LocalBlob{}, err
-	}
-	zw := gzip.NewWriter(f)
-	n, err := zw.Write(data)
-	if err != nil {
-		_ = f.Close()
-		return LocalBlob{}, err
+	path := filepath.Join(dir, blobFilename(key.Role))
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(plaintext); err != nil {
+		return BlobRef{}, err
 	}
 	if err := zw.Close(); err != nil {
-		_ = f.Close()
-		return LocalBlob{}, err
+		return BlobRef{}, err
 	}
-	if err := f.Close(); err != nil {
-		return LocalBlob{}, err
+	if err := os.WriteFile(path, buf.Bytes(), 0o640); err != nil {
+		return BlobRef{}, err
 	}
-	sum := sha256.Sum256(data)
-	return LocalBlob{
+	sum := sha256.Sum256(plaintext)
+	return BlobRef{
 		URI:    "file://" + path,
 		SHA256: hex.EncodeToString(sum[:]),
-		Bytes:  int64(n),
+		Bytes:  int64(len(plaintext)),
 	}, nil
+}
+
+func localKey(deploymentID string, userID int, exchangeID, role string) BlobKey {
+	return BlobKey{
+		DeploymentID: deploymentID,
+		UserID:       userID,
+		ExchangeID:   exchangeID,
+		Role:         role,
+		DT:           time.Now().UTC(),
+	}
 }

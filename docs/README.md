@@ -31,7 +31,7 @@
 2. [New API 技术栈全景](./research/NewAPI技术栈全景.md)（读源码 / 建站前）  
 3. [EC2-中转站原型实验点设计](./experiment/EC2-中转站原型实验点设计.md)（建站、发 Token）  
 4. [EC2-用户侧隔离实验点设计](./experiment/EC2-用户侧隔离实验点设计.md)（`experiment/user-side/`）  
-5. 可选语料：[中转站语料采集插件设计](./experiment/中转站语料采集插件设计.md) + [experiment/corpus-tap/](../experiment/corpus-tap/)  
+5. 可选语料：[corpus-tap 采集+存储 DESIGN](../experiment/corpus-tap/DESIGN.md)（索引：[中转站语料采集插件设计](./experiment/中转站语料采集插件设计.md)）  
 6. 结论写入 [reports/](./reports/)
 
 路径 B 的变量控制与 Runner 分工以 experiment 文档为准；**不在**中转站原型 EC2 上常规跑 `experiment/user-side/t_*`。
@@ -55,7 +55,7 @@
 |----------|----------|
 | [EC2-用户侧隔离实验点设计.md](./experiment/EC2-用户侧隔离实验点设计.md) | [experiment/user-side/](../experiment/user-side/) |
 | [EC2-中转站原型实验点设计.md](./experiment/EC2-中转站原型实验点设计.md) | [experiment/gateway-prototype/](../experiment/gateway-prototype/) |
-| [中转站语料采集插件设计.md](./experiment/中转站语料采集插件设计.md) | [experiment/corpus-tap/](../experiment/corpus-tap/) |
+| [中转站语料采集插件设计.md](./experiment/中转站语料采集插件设计.md)（索引）· [corpus-tap/DESIGN.md](../experiment/corpus-tap/DESIGN.md)（采集+存储定稿） | [experiment/corpus-tap/](../experiment/corpus-tap/) |
 
 索引：[experiment/README.md](../experiment/README.md)
 

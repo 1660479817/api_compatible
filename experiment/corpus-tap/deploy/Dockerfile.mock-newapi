@@ -1,0 +1,11 @@
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+RUN go mod download 2>/dev/null || true
+COPY . .
+RUN CGO_ENABLED=0 go build -o /mock-newapi ./cmd/mock-newapi
+
+FROM alpine:3.20
+COPY --from=build /mock-newapi /usr/local/bin/mock-newapi
+EXPOSE 3000
+ENTRYPOINT ["mock-newapi"]

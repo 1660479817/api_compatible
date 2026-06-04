@@ -6,7 +6,7 @@
 |----------|----------|------|
 | [EC2-用户侧隔离实验点设计](../docs/experiment/EC2-用户侧隔离实验点设计.md) | [user-side/](./user-side/) | 源 → LiteLLM → `t_*` 测试端点 |
 | [EC2-中转站原型实验点设计](../docs/experiment/EC2-中转站原型实验点设计.md) | [gateway-prototype/](./gateway-prototype/) | 占位（Compose / Channel 脚本待实施） |
-| [中转站语料采集插件设计](../docs/experiment/中转站语料采集插件设计.md) | [corpus-tap/](./corpus-tap/) | Go 透明代理骨架 |
+| [中转站语料采集插件设计](../docs/experiment/中转站语料采集插件设计.md) · [**采集+存储 DESIGN**](./corpus-tap/DESIGN.md) | [corpus-tap/](./corpus-tap/) | 采集+存储实现 S0–S5（Go） |
 
 **不在此目录**：[`upstream/`](../upstream/) 为 research 用参考源码 clone，不属于实验实现。
 
