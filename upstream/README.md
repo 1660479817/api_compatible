@@ -15,4 +15,4 @@
 | `codex/` | [openai/codex](https://github.com/openai/codex) | Codex CLI / Responses wire |
 | `opencode/` | [anomalyco/opencode](https://github.com/anomalyco/opencode) | OpenCode 配置与 provider |
 
-阅读入口见 [New API 技术栈全景](../docs/research/NewAPI技术栈全景.md)、[中转站主流技术栈调研](../docs/research/中转站主流技术栈调研.md)。
+阅读入口见 [New API 技术栈全景](../docs/research/NewAPI技术栈全景.md)、[LLM API 网关主流技术栈调研](../docs/research/LLM-API网关主流技术栈调研.md)。

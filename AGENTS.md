@@ -53,7 +53,7 @@
 - [upstream/README.md](./upstream/README.md)（参考源码拉取说明）
 - [docs/research/E2E原生兼容性全景.md](./docs/research/E2E原生兼容性全景.md)（改版时同步 **编写日期**、**评估标的版本** 与矩阵内容）
 - [docs/research/编程Agent模型转换插件调研.md](./docs/research/编程Agent模型转换插件调研.md)（网关大版本或 Agent wire 变更时复审）
-- [docs/research/中转站主流技术栈调研.md](./docs/research/中转站主流技术栈调研.md)（主流网关大版本或新增站点 E3 时复审）
+- [docs/research/LLM-API网关主流技术栈调研.md](./docs/research/LLM-API网关主流技术栈调研.md)（主流网关大版本或新增站点 E3 时复审）
 - [docs/experiment/EC2-用户侧隔离实验点设计.md](./docs/experiment/EC2-用户侧隔离实验点设计.md)（Runner 拓扑、凭据模式或用户侧出站策略变更时复审）
 - [docs/experiment/EC2-中转站原型实验点设计.md](./docs/experiment/EC2-中转站原型实验点设计.md)（New API 原型、Channel/Token 交付或网关侧出站策略变更时复审）
 - [docs/experiment/中转站语料采集插件设计.md](./docs/experiment/中转站语料采集插件设计.md)（Corpus Tap 采集规则、存储、插上即用契约或 **Profile Analyzer 独立 LLM 契约** 变更时复审）

@@ -3,7 +3,7 @@
 > **文档类型**：实验方法论 · **非** 兼容性认证报告（网关侧指标与抽样 probe 可记入 reports；**三 Agent L3–L5 主结论在用户侧 Runner 完成**）  
 > **范围**：境外 AWS EC2 部署 **New API** 中转站原型：Channel 接 Anthropic / OpenAI / 同区域 Bedrock；下发 **平台 Token + API 入口** 供 [用户侧实验点](./EC2-用户侧隔离实验点设计.md) 登记为 `sites.json` 站点  
 > **分工**：[用户侧稿](./EC2-用户侧隔离实验点设计.md) 负责 Runner、N1–N3、L3–L5；本文负责 **运营商侧建站、出站 G1–G2、交付**  
-> **调研**：[中转站主流技术栈调研](../research/中转站主流技术栈调研.md)（E1 产品栈）· [NewAPI 技术栈全景](../research/NewAPI技术栈全景.md)（源码导读）  
+> **调研**：[LLM API 网关主流技术栈调研](../research/LLM-API网关主流技术栈调研.md)（E1 产品栈）· [NewAPI 技术栈全景](../research/NewAPI技术栈全景.md)（源码导读）  
 > **可选增强**：[Corpus Tap](./中转站语料采集插件设计.md) · 技术域边界（§7.1）
 
 ### 文档元信息
@@ -100,7 +100,7 @@
               EC2 用户侧 Runner（另文档 · 模式 B 只打 relay-host）
 ```
 
-**New API 在本实验点的角色**：One API 演进分支；Go/Gin 网关 + **Relay**（`relay/channel/*`、`RelayFormat`）。管理员配置 Channel（上游 Key）→ 用户 → 平台 Access Token；用户侧 Agent 以 `POST /v1/*` + `Bearer <平台 Token>` 访问，**不带** Channel Key。谱系与目录见 [调研稿 §5](../research/中转站主流技术栈调研.md)、[技术栈全景](../research/NewAPI技术栈全景.md)。三 Agent 能否用仍以 **probe + L4** 为准。
+**New API 在本实验点的角色**：One API 演进分支；Go/Gin 网关 + **Relay**（`relay/channel/*`、`RelayFormat`）。管理员配置 Channel（上游 Key）→ 用户 → 平台 Access Token；用户侧 Agent 以 `POST /v1/*` + `Bearer <平台 Token>` 访问，**不带** Channel Key。谱系与目录见 [调研稿 §5](../research/LLM-API网关主流技术栈调研.md)、[技术栈全景](../research/NewAPI技术栈全景.md)。三 Agent 能否用仍以 **probe + L4** 为准。
 
 ```mermaid
 sequenceDiagram
@@ -422,7 +422,7 @@ Anthropic：`cache_read_input_tokens`、`cache_creation_input_tokens`、`input_t
 
 - [New API](https://github.com/QuantumNous/new-api) · [文档](https://docs.newapi.pro/)  
 - [NewAPI 技术栈全景](../research/NewAPI技术栈全景.md)  
-- [中转站主流技术栈调研](../research/中转站主流技术栈调研.md)  
+- [LLM API 网关主流技术栈调研](../research/LLM-API网关主流技术栈调研.md)  
 - [编程 Agent 模型转换插件调研](../research/编程Agent模型转换插件调研.md) §7.2  
 - [EC2-用户侧隔离实验点设计](./EC2-用户侧隔离实验点设计.md)  
 - [中转站语料采集插件设计](./中转站语料采集插件设计.md)  

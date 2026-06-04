@@ -33,7 +33,7 @@
 |--------|------|
 | Platform link | PASS |
 | Catalog verdict | PASS |
-| `GET /v1/models` | HTTP 200 · **1696.5 ms** |
+| `GET /v1/models` | HTTP 200 · **1852.0 ms** |
 | Catalog 分支 | **listed** |
 | Catalog 条数 | 5 |
 
@@ -62,13 +62,13 @@ Protocol profile：**openai**（OpenAI-compatible）
 
 | 模型 | Wire | 端点 | 耗时 | 结果 | 协议面 |
 |------|------|------|------|------|--------|
-| `gpt-5.5` | chat | `/v1/chat/completions` | 6113.1 ms | OK | shape=ok, usage=ok, stream=ok |
-| `gpt-5.5` | responses | `/v1/responses` | 4008.4 ms | OK | shape=ok, usage=ok, stream=ok |
+| `gpt-5.5` | chat | `/v1/chat/completions` | 4513.3 ms | OK | shape=ok, usage=ok, stream=ok |
+| `gpt-5.5` | responses | `/v1/responses` | 3415.5 ms | OK | shape=ok, usage=ok, stream=ok |
 
 **Wire 汇总**（protocol scope，任一模型 OK 即记 yes）：
 
-- OpenCode: **True**
-- Codex: **True**
+- OpenCode: **yes**
+- Codex: **yes**
 
 **Layer 2 判定**：PASS
 
@@ -84,7 +84,7 @@ Protocol profile：**openai**（OpenAI-compatible）
 | Model | `gpt-5.5` |
 | Wire | `/v1/chat/completions` |
 | Relay 模式 | passthrough |
-| 耗时 | **4179.1 ms** |
+| 耗时 | **3628.8 ms** |
 | 结果 | **OK** |
 
 **Relay 协议面**： shape=ok, usage=ok, stream=ok
@@ -99,10 +99,10 @@ Agent `opencode` · smoke_mode `relay` · expected_model `gpt-5.5` · executed 4
 
 | ID | 必选 | 耗时 | 判定 | API model | 自报 model | reason | 输出摘要 |
 |----|------|------|------|-----------|------------|--------|----------|
-| `model_probe` | 是 | 7010.4 ms | PASS | gpt-5.5 | unknown | generic self-report 'unknown' | {"model":"unknown","release_date":"unknown","knowledge_cutoff":"2024-06"} |
-| `explain` | 是 | 4004.9 ms | PASS | gpt-5.5 | — | — | An API gateway sits between clients and backend services, routing requests to the right service. It can also handle cross-cutting tasks like authentication, rate limiting, logging, and response transformation. |
-| `structured` | 是 | 4896.9 ms | PASS | gpt-5.5 | — | — | {"status":"ok"} |
-| `code` | 是 | 3640.0 ms | PASS | gpt-5.5 | — | — | ```python def add(a, b): return a + b ``` |
+| `model_probe` | 是 | 6877.3 ms | PASS | gpt-5.5 | ChatGPT | generic self-report 'ChatGPT' | {"model":"ChatGPT","release_date":"unknown","knowledge_cutoff":"2024-06"} |
+| `explain` | 是 | 3711.8 ms | PASS | gpt-5.5 | — | — | An API gateway is a single entry point that routes client requests to the right backend services. It often handles cross-cutting tasks like authentication, rate limiting, logging, and response transformation. |
+| `structured` | 是 | 4296.8 ms | PASS | gpt-5.5 | — | — | {"status":"ok"} |
+| `code` | 是 | 3147.2 ms | PASS | gpt-5.5 | — | — | ```python def add(a, b): return a + b ``` |
 | `tool` | 否 | 0 ms | SKIP | — | — | skipped (agent_only; smoke_mode=relay) |  |
 
 **Smoke 判定**：PASS

@@ -1,7 +1,7 @@
 # E2E 原生兼容性全景
 
-> **文档类型**：参考矩阵 · **范围**：原厂 / 云托管上游 × 四 Agent（Claude Code、Codex、OpenCode、Gemini CLI）· **不含** 中转站与自建网关  
-> **厂商会持续改版**，以官方文档为准。表中 **●** 表示 L1+L2 原生对齐；L3–L5 实测见 [reports/](../reports/)。非原生组合（中转站 / 自建网关 / 协议桥接）见 [编程Agent模型转换插件调研](./编程Agent模型转换插件调研.md)。云上实验点见 [experiment/](../experiment/)。
+> **文档类型**：参考矩阵 · **范围**：原厂 / 云托管上游 × 四 Agent（Claude Code、Codex、OpenCode、Gemini CLI）· **不含** LLM API 网关层（含商业 Token 站）  
+> **厂商会持续改版**，以官方文档为准。表中 **●** 表示 L1+L2 原生对齐；L3–L5 实测见 [reports/](../reports/)。非原生组合（网关 / 协议桥接）见 [编程Agent模型转换插件调研](./编程Agent模型转换插件调研.md)。云上实验点见 [experiment/](../experiment/)。
 
 ### 文档元信息
 

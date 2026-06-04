@@ -9,7 +9,7 @@
 | 维度 | 关注点 |
 |------|--------|
 | **协议面** | Agent 硬性依赖的 HTTP 端点（如 `/v1/responses`、`/v1/messages`）与中转站是否裁剪、转换 |
-| **中转站栈** | New API / One API / LiteLLM 等实现差异与探测方法 |
+| **网关栈** | New API / One API / LiteLLM 等 LLM API 网关实现差异与探测方法 |
 | **网关转换** | 协议桥接方案地图（非「能 curl 通」即兼容） |
 | **实验可复现** | 用户侧隔离 Runner、中转站原型 EC2、出站审计与语料采集 |
 | **实证** | 源 × Agent 的 L2–L5 结论与复现步骤 |
@@ -24,14 +24,14 @@
 
 | 层级 | 目录 | 角色 |
 |------|------|------|
-| **调研** | [docs/research/](./docs/research/) | 理论基线：协议矩阵、中转站技术栈、转换插件地图 |
+| **调研** | [docs/research/](./docs/research/) | 理论基线：协议矩阵、LLM API 网关技术栈、转换插件地图 |
 | **实验设计** | [docs/experiment/](./docs/experiment/) | 云上实验点：用户侧 Runner、中转站原型、语料采集插件契约 |
 | **评估报告** | [docs/reports/](./docs/reports/) | 站点 × Agent **实测结论**（研究证据，不写在 README 里） |
 
 建议阅读顺序：
 
 1. [E2E 原生兼容性全景](./docs/research/E2E原生兼容性全景.md)  
-2. [中转站主流技术栈调研](./docs/research/中转站主流技术栈调研.md)（若评估 Token 站）  
+2. [LLM API 网关主流技术栈调研](./docs/research/LLM-API网关主流技术栈调研.md)（若评估 Token 站或自托管网关）  
 3. [EC2-中转站原型实验点设计](./docs/experiment/EC2-中转站原型实验点设计.md) → [EC2-用户侧隔离实验点设计](./docs/experiment/EC2-用户侧隔离实验点设计.md)  
 4. 结论对照 [docs/reports/](./docs/reports/)
 

@@ -3,7 +3,7 @@
 本目录存放**具体站点 × Agent** 的测试结论与复现步骤（研究实证层）。  
 研究总览与复现入口见根目录 [README.md](../../README.md)；文档导航见 [docs/README.md](../README.md)。  
 E2E 全景见 [research/E2E原生兼容性全景.md](../research/E2E原生兼容性全景.md)。  
-中转站技术栈见 [research/中转站主流技术栈调研.md](../research/中转站主流技术栈调研.md)。  
+LLM API 网关技术栈见 [research/LLM-API网关主流技术栈调研.md](../research/LLM-API网关主流技术栈调研.md)。  
 云上实验点：[experiment/EC2-用户侧隔离实验点设计.md](../experiment/EC2-用户侧隔离实验点设计.md)（Runner）、[experiment/EC2-中转站原型实验点设计.md](../experiment/EC2-中转站原型实验点设计.md)（原型）；实测结论仍写本目录。
 
 > **索引原则**：每条报告绑定 `experiment/user-side/sites.json` 中的 **站点 ID**。站点之间 **不可** 互推结论。

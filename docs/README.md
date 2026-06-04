@@ -8,7 +8,7 @@
 
 | 目录 | 角色 | 读者 |
 |------|------|------|
-| **[research/](./research/)** | 调研与参考：协议矩阵、中转站栈、网关转换地图 | 建立「什么算兼容」的理论基线 |
+| **[research/](./research/)** | 调研与参考：协议矩阵、LLM API 网关栈、Agent 侧转换地图 | 建立「什么算兼容」的理论基线 |
 | **[experiment/](./experiment/)** | 云上实验点与插件契约：拓扑、变量、出站与语料 | 设计或复现实验 |
 | **[reports/](./reports/)** | 站点 × Agent **实测结论**与复现步骤 | 查证据、写新报告 |
 
@@ -21,13 +21,13 @@
 ### 路径 A — 理解兼容性研究（通用）
 
 1. [E2E 原生兼容性全景](./research/E2E原生兼容性全景.md)  
-2. 评估 Token 站时：[中转站主流技术栈调研](./research/中转站主流技术栈调研.md)  
+2. 评估 Token 站或网关时：[LLM API 网关主流技术栈调研](./research/LLM-API网关主流技术栈调研.md)  
 3. 需要协议桥接对照时：[编程 Agent 模型转换插件调研](./research/编程Agent模型转换插件调研.md)  
 4. 查已有实证：[reports/](./reports/)（索引见 [reports/README.md](./reports/README.md)）
 
 ### 路径 B — 云上中转站 + 用户侧评估（完整实验）
 
-1. [中转站主流技术栈调研](./research/中转站主流技术栈调研.md)（选型）  
+1. [LLM API 网关主流技术栈调研](./research/LLM-API网关主流技术栈调研.md)（选型）  
 2. [New API 技术栈全景](./research/NewAPI技术栈全景.md)（读源码 / 建站前）  
 3. [EC2-中转站原型实验点设计](./experiment/EC2-中转站原型实验点设计.md)（建站、发 Token）  
 4. [EC2-用户侧隔离实验点设计](./experiment/EC2-用户侧隔离实验点设计.md)（`experiment/user-side/`）  
@@ -43,7 +43,7 @@
 | 文档 | 说明 |
 |------|------|
 | [E2E原生兼容性全景.md](./research/E2E原生兼容性全景.md) | Agent 直连官方上游的兼容矩阵（研究基线） |
-| [中转站主流技术栈调研.md](./research/中转站主流技术栈调研.md) | Token 中转站实现栈与 L2 探测 |
+| [LLM-API网关主流技术栈调研.md](./research/LLM-API网关主流技术栈调研.md) | LLM API 网关实现栈与 L2 探测 |
 | [NewAPI技术栈全景.md](./research/NewAPI技术栈全景.md) | New API 单产品架构、Relay、Channel 与部署 |
 | [编程Agent模型转换插件调研.md](./research/编程Agent模型转换插件调研.md) | 网关 / 协议桥接方案地图（非 E4 实证） |
 

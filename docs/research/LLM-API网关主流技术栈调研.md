@@ -1,8 +1,8 @@
-# Token 中转站主流技术栈调研
+# LLM API 网关主流技术栈调研
 
 > **文档类型**：技术栈参考 · **非** 兼容性认证报告 — 产品能力以官方文档（E0/E1）为准；站点 × Agent 结论以 [reports/](../reports/) 实测（E3）为准。  
-> **范围**：LLM Token 聚合、二次分发、统一 API 网关类「中转站」及其自托管实现。  
-> **与 [E2E 原生兼容性全景](./E2E原生兼容性全景.md) 的关系**：全景矩阵不含中转站；本文说明中转站 **实现栈与对外协议面**，供选型与 L2 探测。  
+> **范围**：**LLM API 网关**（LLM API Gateway / AI API Gateway）——多上游聚合、Key 二次分发、统一 HTTP 协议面；含 One API / New API / Sub2API / LiteLLM 等自托管实现，以及商业 Token 站、SaaS 聚合与企业网关。  
+> **与 [E2E 原生兼容性全景](./E2E原生兼容性全景.md) 的关系**：全景矩阵不含 **网关层**；本文说明网关 **实现栈与对外协议面**，供选型与 L2 探测。  
 > **与 [编程 Agent 协议转换与网关调研](./编程Agent模型转换插件调研.md) 的关系**：该文描述 **Agent 侧桥接**；本文描述 **网关产品如何实现聚合与转发**。
 
 ### 文档元信息
@@ -10,7 +10,7 @@
 | 项 | 内容 |
 |----|------|
 | **编写日期** | 2026-06-03 |
-| **修订日期** | 2026-06-03（v2：证据等级、术语表、探测解读、局限声明） |
+| **修订日期** | 2026-06-04（v3：总称改为 LLM API 网关；「中转站」收窄为商业 Token 站俗称；补 Sub2API） |
 | **调研基线** | New API `v1.0.0-rc.9`（2026-05-26）· One API `main` 活跃分支 · LiteLLM Docker `-stable` 线 · 本仓库 E3 首批（2026-06-01，站点见 [reports](../reports/README.md)） |
 | **复审触发** | 主流网关大版本变更、新增或废弃 `/v1/responses` / Realtime 等端点、本仓库新增站点 E3 报告 |
 | **待补实测** | 自托管 New API × 三 Agent 的 L3–L5（当前 E3 完整批次仅首批登记站点）；境外原型见 [EC2-中转站原型实验点设计.md](../experiment/EC2-中转站原型实验点设计.md)，用户侧 Runner 见 [EC2-用户侧隔离实验点设计.md](../experiment/EC2-用户侧隔离实验点设计.md) |
@@ -39,9 +39,9 @@
 
 ## 1. 问题定义与术语
 
-### 1.1 中转站的定义
+### 1.1 LLM API 网关的定义
 
-在本仓库语境下，**Token 中转站** 指介于终端用户与 **原厂 / 云厂商 LLM API** 之间的聚合服务，通常提供：
+在本仓库语境下，**LLM API 网关**（英语常作 **LLM API Gateway** / **AI API Gateway**；Claude Code 官方文档称 [LLM Gateway](https://code.claude.com/docs/en/llm-gateway)）指介于终端用户与 **原厂 / 云厂商 LLM API** 之间的聚合服务，通常提供：
 
 | 能力 | 说明 |
 |------|------|
@@ -51,14 +51,18 @@
 | **计费与配额** | 预扣费、按 Token 结算、用户余额、渠道权重与优先级 |
 | **协议裁剪或扩展** | 常仅开放部分端点；亦可能扩展 Midjourney、Suno、Rerank 等非 Chat 能力 |
 
-与 **原厂 API** 的差异：中转站 **不拥有模型算力**，价值在于 **聚合、定价与可用性**；对外协议面 **可能不完整**（参见 [reports/](../reports/) 各站点 × Agent 评估）。
+与 **原厂 API** 的差异：网关 **不拥有模型算力**，价值在于 **聚合、定价与可用性**；对外协议面 **可能不完整**（参见 [reports/](../reports/) 各站点 × Agent 评估）。
+
+### 1.1.1 「中转站」俗称（子集）
+
+中文社区常把 **商业 Token 站**（闭源 SaaS、按量购买平台 Access Token）口语称为 **中转站** 或 **Token 中转站**。本仓库在区分 **运营形态** 时保留该俗称；**不** 作为 New API、LiteLLM、Sub2API 等自托管网关产品的总称。
 
 ### 1.2 术语表
 
 | 术语 | One API / New API | LiteLLM | 含义 |
 |------|-------------------|---------|------|
 | **Channel / 渠道** | Channel | Deployment | 指向上游厂商的一条连接（Base URL + Key + 类型） |
-| **Token / 访问令牌** | Access Token | Virtual Key | 用户调用中转站 API 的 Bearer Key |
+| **Token / 访问令牌** | Access Token | Virtual Key | 用户调用网关 API 的 Bearer Key |
 | **Relay / 转发** | `controller.Relay` | `proxy_server` → SDK | 鉴权、选渠、转换、回写响应的核心路径 |
 | **Adaptor / 适配器** | `relay/adaptor` 或 `relay/channel` | Provider 模块 | 请求/响应在「对外协议」与「上游协议」间转换 |
 | **RelayFormat** | New API `types.RelayFormat` | — | 入站协议类型（Chat、Messages、Responses 等） |
@@ -67,17 +71,17 @@
 ### 1.3 与「协议转换 / 网关插件」的边界
 
 ```text
-中转站（本文）   = 平台级网关：渠道、计费、多租户、对外 API 面
-Agent 侧桥接（另文） = 客户端与上游之间的协议适配：Responses↔Chat、Messages↔Chat
+LLM API 网关（本文） = 平台级网关：渠道、计费、多租户、对外 API 面
+Agent 侧桥接（另文）   = 客户端与上游之间的协议适配：Responses↔Chat、Messages↔Chat
 ```
 
-二者可叠加：例如 Codex 经 **codex-bridge** 访问 **仅暴露 Chat 的中转站**；LiteLLM 亦可同时承担网关与部分协议转换。
+二者可叠加：例如 Codex 经 **codex-bridge** 访问 **仅暴露 Chat 的商业 Token 站**；LiteLLM 亦可同时承担网关与部分协议转换。
 
 ### 1.4 调研范围
 
 | 纳入 | 不纳入 |
 |------|--------|
-| One API、New API 及 Go 系 fork | 纯本地推理（Ollama、vLLM）— 属上游，非中转 |
+| One API、New API、Sub2API 及 Go 系 fork | 纯本地推理（Ollama、vLLM）— 属上游，非网关 |
 | LiteLLM Proxy（AI Gateway） | Agent 内置 MCP / 插件市场（见协议转换调研 §1.2） |
 | OpenRouter、Portkey 等 SaaS / 企业网关 | Gemini CLI 专用 `generateContent` 生态 |
 | 商业 Token 站（`sites.json` 登记；**须逐站 probe**） | 各站定价、合规条款、服务等级协议 |
@@ -143,8 +147,8 @@ Layer 3（`run-source-agent-test.sh`）经 LiteLLM；与 Layer 2 勿混列。
 
 ```mermaid
 flowchart TB
-  subgraph TYPES["中转站形态"]
-    SELF["自托管开源\nOne API / New API / LiteLLM"]
+  subgraph TYPES["网关形态"]
+    SELF["自托管开源\nOne API / New API / Sub2API / LiteLLM"]
     SAAS["商业 Token 站\nsites.json 登记项"]
     AGG["SaaS 聚合\nOpenRouter"]
     ENT["企业 AI Gateway\nPortkey / Kong AI / Envoy AI"]
@@ -156,7 +160,7 @@ flowchart TB
 
 | 形态 | 典型产品 | 源码与部署 | 主要用户 | 证据 |
 |------|----------|------------|----------|------|
-| **自托管开源** | One API、New API、LiteLLM | Docker / 二进制 / Helm | 个人、小团队、二次开发 | E1 |
+| **自托管开源** | One API、New API、Sub2API、LiteLLM | Docker / 二进制 / Helm | 个人、小团队、二次开发 | E1 |
 | **商业 Token 站** | 各 `sites.json` 登记 SaaS | 闭源 SaaS | 按量购 Token 的开发者 | E3（按站点报告） |
 | **SaaS 聚合** | OpenRouter | 闭源 API | 多模型试用、BYOK、智能路由 | E1–E2 |
 | **企业网关** | Portkey、LiteLLM Enterprise、Kong AI | 托管或私有化 | 审计、SLA、策略与可观测 | E1 |
@@ -171,12 +175,13 @@ flowchart TB
 |--------|-------------|----------|--------|-------------|------------|
 | **One API** | Go · Gin | React · Vite · Semi Design | SQLite / MySQL / PG · GORM | Redis（可选） | `relay/` + `relay/adaptor/*` |
 | **New API** | Go · Gin（One API 演进） | React · Vite · Semi · Bun | 同上 | Redis · 进程内缓存 | `relay/channel/*` · `RelayFormat` |
+| **Sub2API** | Go · Gin（New API 系） | 继承 New API 管理台 | 同上 | 同上 | 同上；侧重订阅账号池与拼车运营 |
 | **LiteLLM Proxy** | Python · FastAPI · Uvicorn | 内置 Admin UI | PostgreSQL · Prisma | Redis · DualCache · RQ/Celery | `litellm/` SDK + Router |
 | **OpenRouter** | **闭源**（公开材料未披露实现语言） | Web 控制台 | 云端计费账本 | 据第三方架构分析：Redis、熔断、缓存（E2） | OpenAI Chat 归一化 + Provider 路由 |
 | **Portkey** | 闭源（支持 SaaS / 私有部署） | Dashboard | 云端或客户环境 | 未公开 | Responses / Messages / Chat（E1，需查当前文档） |
 | **商业 Token 站** | 未知（常见为 New API fork 或自研） | 各站定制 | — | — | **必须 E3 探测** |
 
-**生态观察（E2）**：中文 Token 二次分发社区大量基于 **One API → New API** fork 链；英文团队统一网关场景更常见 **LiteLLM** 或 **Portkey**。该观察 **不能** 替代单站 probe。
+**生态观察（E2）**：中文 Token 二次分发社区大量基于 **One API → New API** fork 链，运营向场景常见 **Sub2API**；英文团队统一网关场景更常见 **LiteLLM** 或 **Portkey**。该观察 **不能** 替代单站 probe。
 
 ---
 
@@ -188,6 +193,7 @@ flowchart TB
 |------|------|------|------|
 | [One API](https://github.com/songquanpeng/one-api) | 源头 | LLM API 管理与 Key 分发；单二进制 + Docker | E1 |
 | [New API](https://github.com/QuantumNous/new-api) | 活跃演进分支 | 多 `RelayFormat`、扩展渠道、Responses / Realtime 等 | E1 |
+| [Sub2API](https://github.com/Wei-Shaw/sub2api) | New API 系垂直版 | 订阅配额分发、多账号池、拼车运营、内置支付；架构与 Relay 机制同系 | E1–E2 |
 | 私有部署 / 白标站 | Fork 或深度定制 | 可能与上游 **版本漂移**；UI 相似 ≠ 协议面一致 | E2 |
 
 本仓库可通过 `./upstream/pull.sh newapi` 拉取 New API 参考源码到 `upstream/newapi/`（gitignored，不纳入版本库）。
@@ -263,7 +269,7 @@ sequenceDiagram
 | OpenAI Responses | `POST /v1/responses` | Codex | **代码存在 ≠ 部署暴露** |
 | Models | `GET /v1/models` | 模型发现 | Claude Code 可选 Gateway 发现 |
 | Gemini | `/v1beta/models/*` | Gemini CLI | 非本仓库三 Agent 主路径 |
-| Realtime | WebSocket | Codex（可选 WS） | 多数中转站未启用 |
+| Realtime | WebSocket | Codex（可选 WS） | 多数商业 Token 站未启用 |
 | 扩展任务 | Midjourney、Suno、Rerank、Dify 等 | — | 非 Coding Agent 主场景 |
 
 > **重要**：New API **源码支持** Responses 路由（E1），但具体 Token 站是否对外暴露，取决于 **部署版本、渠道类型、管理员开关与上游能力**。不得因「疑似 New API 皮肤」推断 Codex 可用。
@@ -274,7 +280,7 @@ sequenceDiagram
 
 ### 6.1 产品组成
 
-| 组件 | 用途 | 中转站语境 |
+| 组件 | 用途 | 网关语境 |
 |------|------|------------|
 | **Python SDK** | 代码内 `completion()` 统一调用 100+ 厂商 | 嵌入业务，非完整多租户 UI |
 | **AI Gateway（Proxy）** | 中心化 HTTP 服务 | Virtual Key、预算、路由、观测 |
@@ -374,7 +380,7 @@ Client → proxy_server.py（FastAPI）
 | Kong AI Gateway | Kong 插件生态 | 适合已有 Kong 的团队 | E1 |
 | Envoy AI Gateway | Service Mesh 入口 | K8s / Istio 环境 | E1 |
 
-**定位区分**：企业网关优先解决 **谁在用、花费多少、能否审计**；Token 中转站优先解决 **单一 Key 访问多模型、价格聚合**。
+**定位区分**：企业网关优先解决 **谁在用、花费多少、能否审计**；商业 Token 站（俗称中转站）优先解决 **单一 Key 访问多模型、价格聚合**。
 
 ---
 
@@ -426,7 +432,7 @@ flowchart LR
 | Tool 多轮 | Chat `tool_calls` · Messages `tool_use` · Responses `function_call` 语义对齐 |
 | 流式增量 | SSE chunk 字段完整；客户端 idle 超时 |
 | Reasoning / Thinking | 部分网关剥离或改写 reasoning 字段 |
-| WebSocket | Codex 可选；多数中转站仅 SSE |
+| WebSocket | Codex 可选；多数商业 Token 站仅 SSE |
 | 模型列表一致性 | `GET /v1/models` 与可路由渠道一致 |
 
 ### 9.3 安全与合规
@@ -462,7 +468,7 @@ flowchart LR
 | OpenRouter 直连 | 否 | 否 | 可 | E0 + E1 |
 | OpenRouter + 前置 LiteLLM | 视配置 | 视配置 | 可 | E1 |
 
-Codex 经 **仅 Chat 的中转站** 的可行路径见 [协议转换调研 §5](./编程Agent模型转换插件调研.md#5-codex转换与路由)（外置 Responses 桥，非改 `wire_api`）。
+Codex 经 **仅 Chat 的网关 / 商业 Token 站** 的可行路径见 [协议转换调研 §5](./编程Agent模型转换插件调研.md#5-codex转换与路由)（外置 Responses 桥，非改 `wire_api`）。
 
 ---
 
@@ -611,6 +617,7 @@ Codex 经 **仅 Chat 的中转站** 的可行路径见 [协议转换调研 §5](
 
 - [songquanpeng/one-api](https://github.com/songquanpeng/one-api)
 - [QuantumNous/new-api](https://github.com/QuantumNous/new-api) · [Relay 文档](https://docs.newapi.pro/)
+- [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api)（New API 系 · 订阅配额分发）
 - [BerriAI/litellm](https://github.com/BerriAI/litellm) · [Proxy 文档](https://docs.litellm.ai/docs/simple_proxy)
 - [New API 仓库 CLAUDE.md（架构摘要）](https://github.com/QuantumNous/new-api/blob/main/CLAUDE.md)
 
@@ -629,4 +636,4 @@ Codex 经 **仅 Chat 的中转站** 的可行路径见 [协议转换调研 §5](
 
 ---
 
-**摘要**：中转站实现栈可归纳为 **Go/Gin 系（One API → New API）** 与 **Python/FastAPI 系（LiteLLM）** 两条主线；商业 Token 站实现不透明，**协议面不可推测**。接入 Coding Agent 时，先以 **Layer 1–2（assess-platform + assess-protocol）** 完成源原生探测，再以 **`run-source-agent-test` / `t_*` 与 reports 完成 Layer 3 与 E2E L3–L5**；产品文档（E1）与站点实测（E3）须分开引用。
+**摘要**：LLM API 网关实现栈可归纳为 **Go/Gin 系（One API → New API，含 Sub2API 等垂直 fork）** 与 **Python/FastAPI 系（LiteLLM）** 两条主线；商业 Token 站（俗称中转站）实现不透明，**协议面不可推测**。接入 Coding Agent 时，先以 **Layer 1–2（assess-platform + assess-protocol）** 完成源原生探测，再以 **`run-source-agent-test` / `t_*` 与 reports 完成 Layer 3 与 E2E L3–L5**；产品文档（E1）与站点实测（E3）须分开引用。
