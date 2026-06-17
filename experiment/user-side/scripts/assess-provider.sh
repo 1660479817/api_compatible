@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provider profile assessment: direct API checks without LiteLLM / Agent E2E.
+# Provider profile assessment: direct API checks.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +19,7 @@ Options:
   --repeat N             Sequential reliability repeat count
   --concurrency N        Optional concurrent request count
   --timeout SEC          Per request timeout seconds
+  --date YYYY-MM-DD      Report date override
   --cache-check          Run optional GPT/Claude cache behavior observation
   --write-report         Write docs/reports/{platform}-平台评估报告-{date}.md
   --json                 Print full JSON result
@@ -36,7 +37,7 @@ while [[ $# -gt 0 ]]; do
       CONFIG="${2:-}"
       shift 2
       ;;
-    --platform|--provider-profile|--repeat|--concurrency|--timeout)
+    --platform|--provider-profile|--repeat|--concurrency|--timeout|--date)
       ARGS+=("$1" "${2:-}")
       shift 2
       ;;

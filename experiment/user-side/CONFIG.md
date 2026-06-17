@@ -1,98 +1,102 @@
-# user-side 配置分工
+# user-side 配置说明
 
-评估链路：**Layer 1–2 直打源** · **Layer 3 源 → LiteLLM → Agent**。按 **Key + 模型族** 组织测试（用户心智：GPT 模型 → Codex，Claude 模型 → Claude Code，OpenCode 作通用探针）。
+本目录只有一份业务配置：`provider-profiles.json`。它描述第三方平台的多个 profile，每个 profile 是一组可独立调用的 API 入口。
 
-## 文件一览
+## 文件
 
-| 文件 | 描述什么 | 不写什么 | 主要消费者 |
-|------|----------|----------|------------|
-| **`sites.json`** | 站点身份、URL、`protocol`（传输面）、`supported_models`、`api_key_env` | 测哪些 model、族 → Agent 映射 | Layer 1；LiteLLM 出站 URL |
-| **`assess-plan.json`** | 模型族 `families`、Layer 2 wire、Layer 3 模型与 OpenCode provider | 站点 URL、密钥 | `assess-protocol`；`write-litellm-config`；`t_*` |
-| **`provider-profiles.json`** | 第三方平台 profile：一个平台多入口、多 Key、多协议、目标模型 | Agent / LiteLLM E2E | `assess-provider` |
-| **`.env`** | API Key 值 | 站点结构 | 全部（Git 忽略） |
+| 文件 | 职责 | 是否提交 |
+|------|------|----------|
+| `provider-profiles.example.json` | 配置模板 | 是 |
+| `provider-profiles.json` | 本地实际平台配置 | 否 |
+| `.env.example` | 密钥变量模板 | 是 |
+| `.env` | 本地密钥值 | 否 |
 
-## 模型族 → Agent（评估主轴）
+## `provider-profiles.json`
 
-| 族 `family` | 用户场景主 Agent | Layer 2 默认 wire | Layer 3 默认 Agent |
-|-------------|------------------|-------------------|---------------------|
-| **`gpt`** | **Codex** | `chat` + `responses` | OpenCode + Codex |
-| **`anthropic`** | **Claude Code** | `chat` + `messages` | OpenCode + Claude |
-| **`other`** | （仅探针） | `chat` | OpenCode |
+顶层字段：
 
-- **OpenCode**：每个族的 **通用 chat 探针**（连通、流式、真伪 smoke），不替代该族主 Agent 的 L4 结论。
-- **`sites.json` → `protocol`**：仅限制 wire 与 `sites` 传输面的交集（如 `openai` 站不盲测 `messages`）；**不**决定「测哪些族」。
-
-多族站点（如 `test_gpt_claude`）须 **`--family gpt`** 或 **`--family anthropic`** 跑 Layer 2–3；仅一种族时可省略。
-
-## 三种「模型列表」（勿混）
-
-| 来源 | 含义 | 用于 |
+| 字段 | 类型 | 说明 |
 |------|------|------|
-| **`sites.json` → `supported_models`** | 文档宣称 model id | Layer 1 对照 catalog |
-| **`GET /v1/models`** | 运行时 catalog | Layer 1 分支 |
-| **`families.<name>.models`** | 本实验要测的 model id | Layer 2–3 |
+| `repeat` | number | 默认顺序重复请求次数，默认 5 |
+| `concurrency` | number | 默认并发请求数，默认 0 |
+| `timeout_sec` | number | 单次请求超时秒数，默认 120 |
+| `platforms` | object | 平台集合，key 是平台 ID |
 
-## `assess-plan.json` 字段
+平台字段：
 
-| 路径 | 说明 |
-|------|------|
-| `model_families` | 全局族定义（`primary_agent`、`layer2_wires`、`layer3_agents`） |
-| `sites.<id>.families.<name>` | `{ "models": [...], "layer3": { "models": {...}, "agents": [...] } }` |
-| `sites.<id>.layer3.opencode` | 站点级 OpenCode provider（各族共享） |
-| `smoke_scenarios[]` | Layer 3 smoke；`model_probe` 对照 `layer3.models` |
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 展示名 |
+| `profiles` | object | profile 集合 |
+| 其他字段 | any | 可作为 profile 默认值，被 profile 内同名字段覆盖 |
 
-`profiles` 为 **`families` 的废弃别名**；CLI **`--profile`** 等同 **`--family`**。
+profile 字段：
 
-**族推断**（未写 `--family` 时）：单族站自动选中；多族站 `codex`→`gpt`、`claude`→`anthropic`、`opencode`→`gpt`（若存在）。`t_*` 与 `assess-source` 共用该逻辑。
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `base_url` | string | 是 | API 入口；可写到 `/v1`，脚本会自动拼接端点 |
+| `api_key_env` | string | 是 | `.env` 中的密钥变量名 |
+| `protocol` | string | 是 | `openai`、`anthropic`、`mixed`，也支持 `*-compatible` 别名 |
+| `wires` | array | 否 | 要测的 wire：`chat`、`responses`、`messages` |
+| `models` | array/string | 是 | 目标模型 ID |
+| `cache_test` | string | 否 | `openai_auto_prefix` 或 `anthropic_ephemeral` |
+| `repeat` | number | 否 | 覆盖顶层重复次数 |
+| `concurrency` | number | 否 | 覆盖顶层并发数 |
+| `timeout_sec` | number | 否 | 覆盖顶层超时 |
 
-## 配置 → 脚本映射
+## 多入口、多 Key
 
-```text
-sites.json
-  └─ assess-platform.sh          Layer 1
+同一平台如果同时提供 GPT 和 Claude 两类入口，建议拆成两个 profile：
 
-sites.json + assess-plan.json + --family
-  └─ assess-protocol.sh          Layer 2
-  └─ litellm-proxy.sh / t_*      Layer 3
-  └─ assess-source.sh            Layer 1–3 一键
-
-run-user-side-compat.sh          L1 一次 + 按族或 --agents 批量 L3
-assess-family.sh               **推荐**：一族 L1–2 + 族内全部 Agent L3（默认 --smoke）
-assess-provider.sh             第三方平台轻量体检：profile API 直测，不跑 Agent / LiteLLM
+```json
+{
+  "platforms": {
+    "vendor": {
+      "profiles": {
+        "openai_gpt": {
+          "base_url": "https://api.vendor.example/v1",
+          "api_key_env": "VENDOR_OPENAI_KEY",
+          "protocol": "openai",
+          "wires": ["chat", "responses"],
+          "models": ["gpt-example"]
+        },
+        "anthropic_claude": {
+          "base_url": "https://claude.vendor.example",
+          "api_key_env": "VENDOR_ANTHROPIC_KEY",
+          "protocol": "anthropic",
+          "wires": ["messages"],
+          "models": ["claude-example"]
+        }
+      }
+    }
+  }
+}
 ```
 
-## 第三方平台 profile 评估
+这样报告会在同一个平台下分别给出两个 profile 的协议、时延、usage 与缓存观察结论。
 
-`provider-profiles.json` 面向接入前小体检；它与 `sites.json` / `assess-plan.json` 独立。适合一个平台同时提供 OpenAI-compatible 与 Anthropic-compatible 入口，且不同模型族需要不同令牌的情况。
+## Usage / token 统计
 
-```bash
-cp provider-profiles.example.json provider-profiles.json
-# 在 .env 中填写 provider-profiles.json 里的 api_key_env
-./scripts/assess-provider.sh --platform example --write-report
-./scripts/assess-provider.sh --platform example --provider-profile openai_gpt --cache-check
-```
+脚本只读取平台响应中的 `usage`，不会调用平台后台账单。归一化字段包括：
 
-评估内容：
+| 归一化字段 | 常见来源 |
+|------------|----------|
+| `input_tokens` | `input_tokens`、`prompt_tokens` |
+| `output_tokens` | `output_tokens`、`completion_tokens` |
+| `total_tokens` | `total_tokens` 或 input + output |
+| `cache_read_tokens` | `cache_read_input_tokens`、`prompt_tokens_details.cached_tokens`、`input_tokens_details.cached_tokens` |
+| `cache_write_tokens` | `cache_creation_input_tokens`、`input_tokens_details.cache_creation_tokens` |
+| `reasoning_tokens` | `reasoning_tokens`、`completion_tokens_details.reasoning_tokens` |
 
-- `GET /v1/models` 与 catalog 对比。
-- 目标模型 × wire 最小调用：`chat` / `responses` / `messages`。
-- 对可用 wire 做 stream 基础检查。
-- 轻量 smoke：普通生成、JSON、代码、模型自报。
-- 轻量可靠性：默认 5 次连续请求；可选 `--concurrency N`。
-- provider-reported usage 合理性检查：保留原始 usage，归一化 input/output/cache/reasoning，并用本地粗估与控制变量发现明显异常。
-- 可选 cache 行为观察：OpenAI/GPT 自动前缀缓存、Anthropic/Claude `cache_control: {"type":"ephemeral"}`。
+合理性检查只做粗筛：本地按字符估算 token，并标记缺失、字段不完整、明显不可能或差异过大的 usage。它不能证明平台一定按真实 token 计费。
 
-注意：usage 与 cache 都是平台自报加行为观察，不能证明真实账单；异常只表示需要账单侧或后台日志复核。
+## 缓存观察
 
-## 报告
+`--cache-check` 会对每个 profile 选择一个可用模型做两次相同前缀请求：
 
-`docs/reports/{report_domain}-源评估报告-{YYYY-MM-DD}.md` — 范围须含 **`family`** 与 **主 Agent**（自动生成）。
+| 类型 | 条件 | 观察字段 |
+|------|------|----------|
+| `openai_auto_prefix` | 长前缀完全一致，缓存由平台自动触发 | `prompt_tokens_details.cached_tokens` 或同类字段 |
+| `anthropic_ephemeral` | 请求体显式加入 `cache_control: {"type":"ephemeral"}` | `cache_creation_input_tokens`、`cache_read_input_tokens` |
 
-```bash
-cd experiment/user-side && source .env
-./scripts/assess-source.sh --site ai.oai.red --family gpt --agent codex --write-report
-./scripts/assess-family.sh --site ai.oai.red --family gpt --smoke
-./scripts/assess-family.sh --site test_gpt_claude --family gpt --smoke --write-report
-```
-
-设计稿：[EC2-用户侧隔离实验点设计 §2.1](../../docs/experiment/EC2-用户侧隔离实验点设计.md#21-三层评估法)
+未观察到缓存不一定表示平台不支持，可能是阈值、TTL、模型、网关隐藏 usage 或计费策略导致。

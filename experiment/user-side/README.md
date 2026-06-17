@@ -1,286 +1,114 @@
-# user-side — 用户侧源评估实验
+# user-side - 第三方模型平台评估
 
-本目录包含两类可运行评估：
-
-| 模式 | 配置 | 是否经过 LiteLLM / Agent | 用途 |
-|------|------|--------------------------|------|
-| **第三方平台轻量体检** | `provider-profiles.json` | 否 | 接入前直测平台 profile、协议、stream、usage、缓存与轻量可靠性 |
-| **源 → LiteLLM → Agent 三层评估** | `sites.json` + `assess-plan.json` | 是 | 验证指定 Coding Agent 经 LiteLLM relay 后是否端到端可跑 |
-
-第二种模式是 **[EC2-用户侧隔离实验点设计](../../docs/experiment/EC2-用户侧隔离实验点设计.md)** 的可运行实现；第一种模式用于更轻量的第三方平台接入前筛查。
-
-可在本机、CI 或 EC2 Runner 上运行；脚本不绑定 AWS，设计稿中的 SG / N1–N3 出站审计属于云上增强项。
-
-**配置分工**（字段级说明见 [`CONFIG.md`](./CONFIG.md)）：
-
-| 文件 | 职责 |
-|------|------|
-| [`sites.json`](./sites.json) | **描述站点**：URL、`protocol`、文档模型列表、`api_key_env` |
-| [`assess-plan.json`](./assess-plan.json) | **描述测什么**：模型族 `families`、Layer 2 wire、Layer 3 模型与 smoke |
-| [`provider-profiles.example.json`](./provider-profiles.example.json) | **第三方平台 profile 体检模板**：一个平台多入口、多 Key、多协议；不跑 Agent/LiteLLM E2E |
-| [`.env`](./.env.example) | API Key（Git 忽略；变量名对齐 `api_key_env`） |
-
-协作与 Git 规则：[AGENTS.md](./AGENTS.md)
-
----
-
-## 评估要回答什么
-
-第三方平台轻量体检回答：
-
-1. 一个平台下的多个 profile（不同入口、不同 Key、不同协议）是否可访问？
-2. 目标模型的 `chat` / `responses` / `messages` 协议是否直连可用？
-3. stream、轻量 smoke、provider-reported usage、缓存行为和短测可靠性是否存在明显风险？
-
-源 → LiteLLM → Agent 三层评估回答：
-
-1. 源是否可达、鉴权是否有效、catalog 返回什么？
-2. 在源上，assess-plan 配置的 model × wire 能否原生跑通？
-3. 经 LiteLLM relay 后，指定 Agent 能否 E2E？可选 smoke 场景结果如何？
-
-报告 **只记录测试事实**（PASS/FAIL/SKIP、耗时、协议面、API model 等）；是否采用该源由人或在报告之上解读。
-
----
-
-## 两种拓扑
-
-### 第三方平台轻量体检
+本目录只保留新的 provider profile 测试流程，用于接入第三方模型平台前做轻量体检。它直接请求平台 API，不做客户端端到端跑通测试。
 
 ```text
-assess-provider ──► 第三方平台 profile（provider-profiles.json base_url）
+assess-provider -> provider profile(base_url + api_key_env + protocol + models)
 ```
-
-这条路径 **不启动 LiteLLM，不启动 Codex / Claude Code / OpenCode**。它只直测 provider profile：catalog、协议、stream、smoke、usage 合理性、轻量可靠性，以及可选缓存观察。
-
-### 源 → LiteLLM → Agent 三层评估
-
-```text
-Layer 1–2   探针 ──────────────────────────────► 上游源（sites.json base_url）
-Layer 3     Agent / smoke ──► LiteLLM :4000 ──► 上游源
-```
-
-这条路径保留给 Coding Agent 端到端兼容性验证。LiteLLM 配置由 `maas.py write-litellm-config` 按站点生成，落在 `.runtime/litellm.<site>.yaml`；进程由 `scripts/litellm-proxy.sh` 管理。
-
-| Agent | 主 wire | LiteLLM 出站 |
-|-------|---------|--------------|
-| OpenCode | `POST /v1/chat/completions` | Chat 直通 |
-| Claude Code | `POST /v1/messages` | Messages 直通 |
-| Codex | `POST /v1/responses` | 缺 Responses 的源上 **桥接** 为 Chat |
-
-**模型族 → 主 Agent**（见 [`CONFIG.md`](./CONFIG.md)）：`gpt` → Codex，`anthropic` → Claude Code；**OpenCode** 为各族通用 chat 探针。
-
-```bash
-python3 lib/maas.py get families --site test_gpt_claude
-# anthropic,gpt
-
-python3 lib/maas.py get assess_agents --site ai.oai.red --family gpt
-# opencode,codex
-```
-
----
-
-## 前置条件
-
-| 依赖 | 用途 |
-|------|------|
-| **Python 3** | `lib/maas.py` 主入口 |
-| **LiteLLM** | 仅源 → LiteLLM → Agent 模式需要；`assess-provider` 不需要 |
-| **`.env`** | 平台 Token；`cp .env.example .env` 后填写 |
-| **Agent CLI**（可选） | 仅源 → LiteLLM → Agent 模式需要；`assess-provider` 不需要 |
-| **代理**（可选） | 国内访问境外源时设 `MAAS_PROXY`；境外 Runner 可 `MAAS_PROXY_SKIP=1` |
-
----
 
 ## 快速开始
 
 ```bash
 cd experiment/user-side
-cp .env.example .env          # 填写 sites.json 中 api_key_env 对应密钥
-source .env
-
-# GPT 族一键：L1–2 + OpenCode 探针 + Codex（单族站可省略 --family）
-./scripts/assess-family.sh --site ai.oai.red --family gpt --smoke --write-report
-```
-
-等价于：
-
-```bash
-python3 lib/maas.py assess-source --site ai.oai.red --family gpt --agent codex --smoke --write-report
-```
-
-第三方平台接入前轻量体检（不跑 Agent / LiteLLM E2E）：
-
-```bash
 cp provider-profiles.example.json provider-profiles.json
-# 在 .env 中填写 provider-profiles.json 的 api_key_env
+cp .env.example .env
+
+# 编辑 provider-profiles.json：配置平台、profile、base_url、api_key_env、protocol、models
+# 编辑 .env：填写 api_key_env 对应的密钥
+
 ./scripts/assess-provider.sh --platform example --write-report
 ./scripts/assess-provider.sh --platform example --provider-profile openai_gpt --cache-check
 ```
 
-**产出**：
+也可以直接调用 Python：
+
+```bash
+python3 lib/maas.py list-profiles --config provider-profiles.json
+python3 lib/maas.py assess-provider --config provider-profiles.json --platform example --repeat 5 --write-report
+```
+
+## 配置模型
+
+一个平台可以有多个 profile。profile 用来表达同一平台下不同入口、不同协议、不同 Key、不同模型族的组合。
+
+```json
+{
+  "repeat": 5,
+  "concurrency": 0,
+  "timeout_sec": 120,
+  "platforms": {
+    "example": {
+      "name": "Example Provider",
+      "profiles": {
+        "openai_gpt": {
+          "base_url": "https://api.example.com/v1",
+          "api_key_env": "EXAMPLE_OPENAI_KEY",
+          "protocol": "openai",
+          "wires": ["chat", "responses"],
+          "models": ["gpt-example"],
+          "cache_test": "openai_auto_prefix"
+        },
+        "anthropic_claude": {
+          "base_url": "https://claude.example.com",
+          "api_key_env": "EXAMPLE_ANTHROPIC_KEY",
+          "protocol": "anthropic",
+          "wires": ["messages"],
+          "models": ["claude-example"],
+          "cache_test": "anthropic_ephemeral"
+        }
+      }
+    }
+  }
+}
+```
+
+字段说明见 [CONFIG.md](./CONFIG.md)。
+
+## 测试流程
+
+| 阶段 | 测什么 | 方法 | 产出 |
+|------|--------|------|------|
+| 1 | Profile 与鉴权 | 读取 `base_url`、`api_key_env`，请求 `GET /v1/models` | catalog 是否可达、目标模型是否出现在列表 |
+| 2 | 协议面 | 对目标 `models × wires` 发最小请求 | `chat` / `responses` / `messages` 是否返回有效文本 |
+| 3 | 流式返回 | 对已通过的 wire 发 `stream=true` 请求 | SSE 标记、TTFB、总耗时 |
+| 4 | Smoke 场景 | 普通生成、JSON、代码、模型自报 | 必选场景是否通过，模型自报只作弱信号 |
+| 5 | 轻量稳定性与时延 | 默认 5 次顺序请求，可选并发请求 | 成功率、平均/p50/p95/max 时延 |
+| 6 | Usage / token 统计 | 读取平台返回的 `usage`，归一化 token 字段 | input/output/total/cache/reasoning 汇总与合理性状态 |
+| 7 | 缓存行为观察 | 可选 `--cache-check` | GPT 自动前缀缓存、Claude ephemeral cache 是否被观察到 |
+
+第 6 阶段不会证明平台真实账单，只能发现明显异常：缺失 usage、字段不完整、`total_tokens < output_tokens`、缓存 token 大于输入 token、全 0、或平台返回值与本地粗估差异超过 3 倍。
+
+第 7 阶段是行为观察，不作为硬性失败条件。GPT 类缓存由平台自动触发；Claude 类缓存需要请求体包含 `cache_control: {"type":"ephemeral"}`。
+
+## 输出
 
 | 产物 | 路径 |
 |------|------|
-| Markdown 报告 | `docs/reports/{report_domain}-源评估报告-{YYYY-MM-DD}.md` |
-| 结构化 JSON | `.runtime/{site}-assess-{YYYYMMDD}.json` |
-| 第三方平台 Markdown | `docs/reports/{platform}-平台评估报告-{YYYY-MM-DD}.md` |
-| 第三方平台 JSON | `.runtime/{platform}-provider-assess-{YYYYMMDD}.json` |
-| LiteLLM 日志 | `.runtime/litellm.{site}.log` |
+| 结构化 JSON | `.runtime/{platform}-provider-assess-{YYYYMMDD}.json` |
+| Markdown 报告 | `docs/reports/{platform}-平台评估报告-{YYYY-MM-DD}.md` |
 
-查询报告路径：
+报告由 `--write-report` 自动生成；同平台同日复测会覆盖同名文件。
 
-```bash
-python3 lib/maas.py report-path --site ai.oai.red --relative
-```
+## 评级
 
----
+| 等级 | 含义 |
+|------|------|
+| A | 协议、stream、smoke、usage、轻量稳定性均未发现明显问题 |
+| B | 可用，但有 usage 缺失/可疑、stream 异常或少量稳定性问题 |
+| C | 协议能通，但必选 smoke 失败 |
+| D | 目标协议完全不可用、usage 明显无效，或短测成功率低于等于 60% |
 
-## 三层评估法
-
-设计稿：[§2.1 三层评估法](../../docs/experiment/EC2-用户侧隔离实验点设计.md#21-三层评估法)
-
-| 层 | 名称 | 拓扑 | 脚本 | 判定依据 |
-|----|------|------|------|----------|
-| **1** | 平台链接 | 直打源 | `assess-platform.sh` | `GET /v1/models`；catalog 分支 `listed` / `empty` / `unavailable`；与 `supported_models` 对照 |
-| **2** | 基础协议 | 直打源 | `assess-protocol.sh` | `families.<name>.models` × wire；记录 `shape` / `usage` / `stream` |
-| **3** | 指定 Agent | 源 → LiteLLM → Agent | `run-source-agent-test.sh` | relay wire probe；可选 smoke（`assess-plan` → `smoke_scenarios`） |
-| **3+** | smoke（可选） | 同上或 `t_*` | `--smoke` | `smoke_mode`: `relay`（默认，HTTP 经 LiteLLM）或 `agent`（完整 Agent CLI） |
-
-**递进关系**：Layer 1 的 catalog 分支决定 Layer 2 是 **listed 对比** 还是 **盲测**；Layer 2 某 wire 缺失时，Layer 3 须在报告中标注依赖 LiteLLM 桥接（Codex 常见）。
-
-**逐层手动跑**：
-
-```bash
-./scripts/assess-platform.sh --site ai.oai.red
-./scripts/assess-protocol.sh --site ai.oai.red --family gpt
-./scripts/run-source-agent-test.sh --site ai.oai.red --family gpt --agent codex --probe-only
-./scripts/run-source-agent-test.sh --site ai.oai.red --family gpt --agent codex --smoke
-```
-
-**批量**（Layer 1 一次；Layer 2–3 按族或 `--agents`）：
-
-```bash
-./scripts/run-user-side-compat.sh --site b.ai --layers-12
-./scripts/run-user-side-compat.sh --site b.ai --family anthropic --smoke
-./scripts/run-user-side-compat.sh --site b.ai --family other --smoke --agents opencode
-```
-
----
-
-## 目录结构
+## 目录
 
 ```text
 experiment/user-side/
-├── sites.json              # 上游站点登记
-├── assess-plan.json        # 各层探测与 smoke 计划
-├── .env.example            # 密钥模板
-├── CONFIG.md               # 配置字段与脚本映射（细则）
-├── AGENTS.md               # 协作 / Git 规则
+├── provider-profiles.example.json
+├── .env.example
+├── CONFIG.md
+├── AGENTS.md
 ├── lib/
-│   ├── maas.py             # 站点注册、各层评估、报告生成
-│   └── maas.sh             # shell 辅助（t_* 启动器引用）
+│   └── maas.py
 ├── scripts/
-│   ├── assess-platform.sh      # Layer 1
-│   ├── assess-protocol.sh      # Layer 2
-│   ├── assess-family.sh        # 一族 L1–2 + 族内多 Agent L3
-│   ├── assess-source.sh        # 单 Agent Layer 1–3 + --write-report
-│   ├── run-source-agent-test.sh # Layer 3
-│   ├── run-user-side-compat.sh  # 批量
-│   └── litellm-proxy.sh        # LiteLLM 启停
-├── t_claude / t_codex / t_opencode   # Agent 启动器（`--family` 可省略，按 Agent 推断）
-└── .runtime/               # 生成物与 JSON 证据（Git 忽略）
+│   └── assess-provider.sh
+└── .runtime/        # 生成物，Git 忽略
 ```
-
----
-
-## 脚本一览
-
-| 脚本 | 作用 |
-|------|------|
-| `assess-family.sh` | **按族批量**：L1–2 + 族内各 Agent L3；默认 `--smoke` |
-| `assess-source.sh` | 单 Agent 全层；`--smoke`；`--write-report` |
-| `assess-platform.sh` | 仅 Layer 1 |
-| `assess-protocol.sh` | 仅 Layer 2 |
-| `run-source-agent-test.sh` | 仅 Layer 3（`--probe-only` / `--smoke`） |
-| `run-user-side-compat.sh` | 批量；`--layers-12` 只跑 1–2 |
-| `litellm-proxy.sh` | `start \| stop \| status --site <id>` |
-| `assess-provider.sh` | 第三方平台 profile 直测：catalog、协议、stream、smoke、usage 合理性、轻量可靠性、可选缓存观察 |
-
----
-
-## `maas.py` 常用命令
-
-在 `experiment/user-side` 下执行：
-
-| 命令 | 说明 |
-|------|------|
-| `list-sites` | 列出 `sites.json` 站点 id |
-| `get families --site <id>` | 该站模型族列表 |
-| `get default_family --site <id> --agent <name>` | 推断模型族（`gpt` / `anthropic` / …） |
-| `get assess_agents --site <id> [--family NAME]` | 该族或全站 Layer 3 Agent 列表 |
-| `get default_model --site <id> --agent <name>` | Layer 3 默认 model |
-| `list-models --site <id>` | 直打源 `GET /v1/models` |
-| `assess-platform --site <id>` | Layer 1（`--json` 输出 JSON） |
-| `assess-protocol --site <id>` | Layer 2 |
-| `probe-relay --site <id> --agent <name>` | Layer 3 relay 探针 |
-| `run-smoke --site <id> --agent <name>` | Layer 3 smoke |
-| `assess-source --site <id> --agent <name> [--smoke] [--write-report]` | 完整评估 |
-| `assess-provider --config provider-profiles.json [--cache-check] [--write-report]` | 第三方平台轻量体检，不跑 Agent/LiteLLM E2E |
-| `report-path --site <id> --relative` | 报告 Markdown 路径 |
-| `write-litellm-config --site <id> --out .runtime/litellm.<id>.yaml` | 生成 LiteLLM 配置 |
-
----
-
-## 已登记站点
-
-| 站点 id | protocol | 说明 |
-|---------|----------|------|
-| `b.ai` | `anthropic` | 族 `anthropic`（Claude Code）+ `other`（Kimi，仅 OpenCode） |
-| `ai.oai.red` | `openai` | 族 `gpt`：`gpt-5.5` → Codex + OpenCode 探针 |
-| `sub2api.salus.icu` | `openai` | 族 `gpt`：`gpt-5.5` |
-| `test_gpt_claude` | `openai` | 族 `gpt` + `anthropic`（[Paratera](https://ai.paratera.com/)） |
-
-### Paratera（`test_gpt_claude`）双族
-
-**Layer 1 一次**；Layer 2–3 用 **`--family`**（`--profile` 为同义别名）：
-
-| family | 主 Agent | Layer 3 | 说明 |
-|--------|----------|---------|------|
-| `gpt` | Codex | OpenCode + Codex | `chat` + `responses` |
-| `anthropic` | Claude Code（若仅有 chat 面则 N/A） | OpenCode | Claude 模型经 chat；不跑 Claude Code 除非有 Messages |
-
-```bash
-cd experiment/user-side && source .env
-
-./scripts/assess-platform.sh --site test_gpt_claude
-
-./scripts/assess-protocol.sh --site test_gpt_claude --family gpt
-./scripts/assess-source.sh --site test_gpt_claude --family gpt --agent codex --write-report
-
-./scripts/assess-protocol.sh --site test_gpt_claude --family anthropic
-./scripts/assess-source.sh --site test_gpt_claude --family anthropic --agent opencode --write-report
-
-./scripts/assess-family.sh --site test_gpt_claude --family gpt --smoke
-./scripts/assess-family.sh --site test_gpt_claude --family anthropic --smoke
-```
-
-详情见 [CONFIG.md](./CONFIG.md)。
-
-新增站点：编辑 `sites.json` + `assess-plan.json` → `.env` 补密钥 → 跑 `assess-source` → 更新 [`docs/reports/README.md`](../../docs/reports/README.md) 索引。
-
----
-
-## 报告约定
-
-- 命名：`{report_domain}-源评估报告-{YYYY-MM-DD}.md`（见 [`docs/reports/README.md`](../../docs/reports/README.md)）
-- 由 `--write-report` **自动生成**；同站同日覆盖，换日保留历史
-- 正文为测试记录，**勿手抄终端日志**；解读写在报告外（人工或 AI）
-
----
-
-## 相关文档
-
-- [EC2-用户侧隔离实验点设计](../../docs/experiment/EC2-用户侧隔离实验点设计.md) — 方法论、Runner、出站审计
-- [EC2-中转站原型实验点设计](../../docs/experiment/EC2-中转站原型实验点设计.md) — 运营商建站与 Token 交付
-- [E2E 原生兼容性全景](../../docs/research/E2E原生兼容性全景.md) — Layer vs L1–L5 术语对照
-- [docs/reports/](../../docs/reports/) — 实测结论归档

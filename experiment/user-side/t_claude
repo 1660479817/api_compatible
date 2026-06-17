@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# Launch Claude Code against a site from sites.json.
-# Primary target: user-side EC2 Runner (docs/experiment/EC2-用户侧隔离实验点设计.md). See experiment/user-side/AGENTS.md.
-set -euo pipefail
-# shellcheck source=lib/maas.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/maas.sh"
-maas_run_claude "$@"

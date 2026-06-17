@@ -1,30 +1,35 @@
-# AGENTS.md — user-side 协作规则
+# AGENTS.md - user-side 协作规则
 
-配置分工见 **[CONFIG.md](./CONFIG.md)**（`sites.json` = 描述站点 · `assess-plan.json` = 测试计划）。
+本目录只维护 provider profile 评估流程。改动代码或文档时，保持 `README.md`、`CONFIG.md`、`provider-profiles.example.json` 和 `scripts/assess-provider.sh` 一致。
 
-## 三层源评估
+## 入口
 
-| 层 | 脚本 | 拓扑 |
-|----|------|------|
-| 1 | `scripts/assess-platform.sh` | 直打源 |
-| 2 | `scripts/assess-protocol.sh` | 直打源 |
-| 3 | `scripts/run-source-agent-test.sh` | 源 → LiteLLM → Agent |
+```bash
+cd experiment/user-side
+./scripts/assess-provider.sh --platform <platform-id> --write-report
+python3 lib/maas.py assess-provider --config provider-profiles.json --platform <platform-id>
+```
 
-按族批量：`scripts/assess-family.sh --site ID --family gpt [--smoke] [--write-report]`  
-单 Agent：`scripts/assess-source.sh --site ID --family NAME --agent NAME [--smoke]`
+## 配置
 
-**模型族**：`gpt` → Codex；`anthropic` → Claude Code；OpenCode 为探针。`t_*` 支持 `--family`；省略时按 Agent 推断（见 CONFIG.md）。
-
-设计稿：[EC2-用户侧隔离实验点设计 §2.1](../../docs/experiment/EC2-用户侧隔离实验点设计.md#21-三层评估法)
-
-## 配置文件
-
-| 路径 | 职责 |
+| 路径 | 规则 |
 |------|------|
-| `sites.json` | 站点：URL、`protocol`、`supported_models`（文档摘录） |
-| `assess-plan.json` | 测试：`families`、各族 `layer3.models` / `opencode` |
-| `.env` | 密钥（Git 忽略） |
+| `provider-profiles.example.json` | 只放模板和假 key 变量名 |
+| `provider-profiles.json` | 本地真实平台配置，Git 忽略 |
+| `.env.example` | 只放变量模板 |
+| `.env` | 本地密钥，Git 忽略 |
+| `.runtime/` | 运行生成物，Git 忽略 |
 
-## Git
+## 报告
 
-禁止提交 `.env`、`.runtime/`。结论写 `docs/reports/`（命名见 CONFIG.md）。
+`--write-report` 会写入 `docs/reports/{platform}-平台评估报告-{YYYY-MM-DD}.md`。报告正文保持事实记录，不手写密钥，不把 usage 合理性检查描述成真实账单审计。
+
+## 验证
+
+提交前至少运行：
+
+```bash
+python -m py_compile lib/maas.py
+python lib/maas.py assess-provider --help
+python -m json.tool provider-profiles.example.json
+```
