@@ -84,6 +84,23 @@ PROVIDER_SMOKE_SCENARIOS: list[dict[str, Any]] = [
     },
 ]
 
+LATENCY_PROBES: list[dict[str, str]] = [
+    {
+        "id": "short_baseline",
+        "label": "Short baseline",
+        "prompt": "Reply with exactly OK.",
+    },
+    {
+        "id": "medium_task",
+        "label": "Medium task",
+        "prompt": (
+            "Write a concise Python function that reads CSV rows from a string, "
+            "groups records by a named column, and returns counts per group. "
+            "Include basic error handling and one usage example."
+        ),
+    },
+]
+
 
 def load_dotenv(path: Path | None = None) -> None:
     env_path = path or USER_SIDE_ROOT / ".env"
@@ -698,7 +715,7 @@ def provider_stream_probe(
     t0 = time.perf_counter()
     try:
         with http_opener(url).open(req, timeout=timeout) as resp:
-            first = resp.read(2048)
+            first = resp.readline()
             ttfb_ms = round((time.perf_counter() - t0) * 1000, 1)
             tail = resp.read(4096)
             latency_ms = round((time.perf_counter() - t0) * 1000, 1)
@@ -955,6 +972,45 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "latency_max_ms": round(max(latencies), 1) if latencies else None,
         "usage_status": usage_status,
         "token_totals": token_totals,
+    }
+
+
+def summarize_latency_cases(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for case in sorted({str(r.get("latency_case") or "unknown") for r in rows}):
+        case_rows = [r for r in rows if r.get("latency_case") == case]
+        out[case] = summarize_records(case_rows)
+    return out
+
+
+def run_provider_latency_probes(
+    profile: dict[str, Any],
+    key: str,
+    wire_map: dict[str, str],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for model, wire in wire_map.items():
+        for scenario in LATENCY_PROBES:
+            row = provider_sync_probe(
+                profile,
+                key,
+                model,
+                wire,
+                scenario["prompt"],
+                timeout=timeout,
+            )
+            row["latency_case"] = scenario["id"]
+            row["latency_label"] = scenario["label"]
+            rows.append(row)
+    return {
+        "rows": rows,
+        "summary": summarize_latency_cases(rows),
+        "note": (
+            "Short baseline measures small prompt complete-response latency; "
+            "medium task is a lightweight approximation of real interactive work."
+        ),
     }
 
 
@@ -1235,6 +1291,12 @@ def run_provider_profile(
             concurrency=concurrency,
             timeout=timeout,
         )
+        latency_profile = run_provider_latency_probes(
+            profile,
+            key,
+            wire_map,
+            timeout=timeout,
+        )
     else:
         smoke = {
             "status": "fail",
@@ -1244,6 +1306,7 @@ def run_provider_profile(
             "optional_failed": 0,
         }
         reliability = {"rows": [], "summary": summarize_records([])}
+        latency_profile = {"rows": [], "summary": {}, "note": ""}
     cache = (
         run_provider_cache_observation(profile, key, wire_map, timeout=timeout)
         if cache_check and wire_map
@@ -1274,6 +1337,7 @@ def run_provider_profile(
         "stream": stream_rows,
         "smoke": smoke,
         "reliability": reliability,
+        "latency_profile": latency_profile,
         "cache_observation": cache,
         "metrics": summarize_records(records),
         "all_request_records": records,
@@ -1383,6 +1447,7 @@ def render_provider_report(result: dict[str, Any]) -> str:
             "",
             "### Reliability",
             "",
+            "- Scenario: short baseline prompt (`Reply with exactly OK.`)",
             f"- Requests: {rel.get('requests', 0)}",
             f"- Success rate: {rel.get('success_rate', 0)}",
             "- Latency avg/p50/p95/max ms: "
@@ -1391,6 +1456,40 @@ def render_provider_report(result: dict[str, Any]) -> str:
             f"{rel.get('latency_p95_ms') or '-'} / "
             f"{rel.get('latency_max_ms') or '-'}",
         ])
+
+        latency_profile = prof.get("latency_profile", {})
+        if latency_profile:
+            lines.extend([
+                "",
+                "### Latency Probes",
+                "",
+                latency_profile.get("note", ""),
+                "",
+                "| Case | Model | Result | Complete ms | Usage |",
+                "|---|---|---|---:|---|",
+            ])
+            for row in latency_profile.get("rows", []):
+                usage_st = row.get("usage_plausibility", {}).get("status", "?")
+                lines.append(
+                    f"| {row.get('latency_label', row.get('latency_case'))} | "
+                    f"`{row['model']}` | {'PASS' if row.get('ok') else 'FAIL'} | "
+                    f"{row.get('latency_ms') if row.get('latency_ms') is not None else '-'} | "
+                    f"{usage_st} |"
+                )
+            lines.extend([
+                "",
+                "| Case | Requests | Success | Avg ms | p50 ms | p95 ms | Max ms |",
+                "|---|---:|---:|---:|---:|---:|---:|",
+            ])
+            for case, summary in latency_profile.get("summary", {}).items():
+                lines.append(
+                    f"| `{case}` | {summary.get('requests', 0)} | "
+                    f"{summary.get('success_rate', 0)} | "
+                    f"{summary.get('latency_avg_ms') or '-'} | "
+                    f"{summary.get('latency_p50_ms') or '-'} | "
+                    f"{summary.get('latency_p95_ms') or '-'} | "
+                    f"{summary.get('latency_max_ms') or '-'} |"
+                )
 
         cache = prof.get("cache_observation")
         if cache:

@@ -70,15 +70,18 @@ python3 lib/maas.py assess-provider --config provider-profiles.json --platform e
 |------|--------|------|------|
 | 1 | Profile 与鉴权 | 读取 `base_url`、`api_key_env`，请求 `GET /v1/models` | catalog 是否可达、目标模型是否出现在列表 |
 | 2 | 协议面 | 对目标 `models × wires` 发最小请求 | `chat` / `responses` / `messages` 是否返回有效文本 |
-| 3 | 流式返回 | 对已通过的 wire 发 `stream=true` 请求 | SSE 标记、TTFB、总耗时 |
+| 3 | 流式返回 | 对已通过的 wire 发 `stream=true` 请求 | SSE 标记、首包 TTFB、总耗时 |
 | 4 | Smoke 场景 | 普通生成、JSON、代码、模型自报 | 必选场景是否通过，模型自报只作弱信号 |
-| 5 | 轻量稳定性与时延 | 默认 5 次顺序请求，可选并发请求 | 成功率、平均/p50/p95/max 时延 |
-| 6 | Usage / token 统计 | 读取平台返回的 `usage`，归一化 token 字段 | input/output/total/cache/reasoning 汇总与合理性状态 |
-| 7 | 缓存行为观察 | 可选 `--cache-check` | GPT 自动前缀缓存、Claude ephemeral cache 是否被观察到 |
+| 5 | 轻量稳定性与短请求时延 | 默认 5 次短问题顺序请求，可选并发请求 | 成功率、平均/p50/p95/max 完整响应时延 |
+| 6 | 延迟探针 | 每个可用模型跑短问题和中等任务各一次 | 区分短请求基线与轻量真实任务的完整响应时延 |
+| 7 | Usage / token 统计 | 读取平台返回的 `usage`，归一化 token 字段 | input/output/total/cache/reasoning 汇总与合理性状态 |
+| 8 | 缓存行为观察 | 可选 `--cache-check` | GPT 自动前缀缓存、Claude ephemeral cache 是否被观察到 |
 
-第 6 阶段不会证明平台真实账单，只能发现明显异常：缺失 usage、字段不完整、`total_tokens < output_tokens`、缓存 token 大于输入 token、全 0、或平台返回值与本地粗估差异超过 3 倍。
+Reliability 使用简短问题，适合做短请求延迟基线；Latency Probes 会额外给出中等任务耗时，更接近 Codex / Claude Desktop 的交互任务，但仍不等于长上下文或多轮工具调用测试。
 
-第 7 阶段是行为观察，不作为硬性失败条件。GPT 类缓存由平台自动触发；Claude 类缓存需要请求体包含 `cache_control: {"type":"ephemeral"}`。
+第 7 阶段不会证明平台真实账单，只能发现明显异常：缺失 usage、字段不完整、`total_tokens < output_tokens`、缓存 token 大于输入 token、全 0、或平台返回值与本地粗估差异超过 3 倍。
+
+第 8 阶段是行为观察，不作为硬性失败条件。GPT 类缓存由平台自动触发；Claude 类缓存需要请求体包含 `cache_control: {"type":"ephemeral"}`。
 
 ## 输出
 

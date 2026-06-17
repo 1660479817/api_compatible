@@ -22,6 +22,18 @@
 | `timeout_sec` | number | 单次请求超时秒数，默认 120 |
 | `platforms` | object | 平台集合，key 是平台 ID |
 
+## 延迟指标
+
+报告中有三类延迟，含义不同：
+
+| 报告位置 | 指标 | 含义 |
+|----------|------|------|
+| `Stream` | `TTFB ms` | 流式请求发出后，收到第一行 SSE 数据的时间，近似首字/首包延迟 |
+| `Reliability` | `Latency avg/p50/p95/max ms` | 默认短问题 `Reply with exactly OK.` 的完整响应耗时统计 |
+| `Latency Probes` | `Short baseline` / `Medium task` | 每个可用模型的短问题和中等任务完整响应耗时 |
+
+短问题适合筛平台基础响应速度；中等任务更接近交互式客户端体验，但仍不覆盖长上下文、长输出、多轮工具调用或限流压测。
+
 平台字段：
 
 | 字段 | 类型 | 说明 |
