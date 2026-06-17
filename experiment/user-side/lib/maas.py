@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime as dt
+import http.client
 import json
 import math
 import os
@@ -221,6 +222,31 @@ def parse_json_payload(raw: bytes, headers: Any | None = None) -> Any:
         return text
 
 
+def read_http_body(resp: Any) -> tuple[bytes, str | None]:
+    try:
+        return resp.read(), None
+    except http.client.IncompleteRead as exc:
+        partial = exc.partial or b""
+        return partial, f"incomplete HTTP response body ({len(partial)} bytes read)"
+
+
+def incomplete_read_payload(
+    status: int,
+    raw: bytes,
+    headers: Any | None,
+    detail: str,
+) -> dict[str, Any]:
+    partial_payload = parse_json_payload(raw, headers)
+    return {
+        "error": detail,
+        "transport_error": "incomplete_read",
+        "partial_http_status": status,
+        "partial_bytes": len(raw),
+        "partial_payload_shape": payload_top_level_summary(partial_payload),
+        "partial_payload": partial_payload,
+    }
+
+
 def http_json(
     method: str,
     url: str,
@@ -245,12 +271,21 @@ def http_json(
     t0 = time.perf_counter()
     try:
         with http_opener(url).open(req, timeout=timeout) as resp:
-            raw = resp.read()
+            raw, read_error = read_http_body(resp)
             latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-            return getattr(resp, "status", 200), parse_json_payload(raw, resp.headers), latency_ms
+            status = getattr(resp, "status", 200)
+            if read_error:
+                return 599, incomplete_read_payload(
+                    status, raw, resp.headers, read_error
+                ), latency_ms
+            return status, parse_json_payload(raw, resp.headers), latency_ms
     except urllib.error.HTTPError as exc:
-        raw = exc.read()
+        raw, read_error = read_http_body(exc)
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        if read_error:
+            return exc.code, incomplete_read_payload(
+                exc.code, raw, exc.headers, read_error
+            ), latency_ms
         return exc.code, parse_json_payload(raw, exc.headers), latency_ms
     except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
@@ -681,6 +716,20 @@ def provider_stream_probe(
             "ttfb_ms": None,
             "stream_duration_ms": None,
             "detail": error_detail(parse_json_payload(exc.read(), exc.headers)),
+        }
+    except http.client.IncompleteRead as exc:
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        partial = exc.partial or b""
+        return {
+            "model": model,
+            "wire": wire,
+            "ok": False,
+            "stream": "fail",
+            "http_status": 599,
+            "latency_ms": latency_ms,
+            "ttfb_ms": None,
+            "stream_duration_ms": None,
+            "detail": f"incomplete HTTP stream body ({len(partial)} bytes read)",
         }
     except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
@@ -1121,11 +1170,19 @@ def profile_grade(profile_result: dict[str, Any]) -> str:
     ):
         return "D"
     reliability = profile_result.get("reliability", {}).get("summary", {})
-    if reliability and reliability.get("success_rate", 1) <= 0.6:
+    if (
+        reliability
+        and reliability.get("requests", 0) > 0
+        and reliability.get("success_rate", 1) <= 0.6
+    ):
         return "D"
     if profile_result.get("smoke", {}).get("status") == "fail":
         return "C"
-    if reliability and reliability.get("success_rate", 1) < 1:
+    if (
+        reliability
+        and reliability.get("requests", 0) > 0
+        and reliability.get("success_rate", 1) < 1
+    ):
         return "B"
     if any(
         r.get("usage_plausibility", {}).get("status") in {"suspicious", "missing", "partial"}
