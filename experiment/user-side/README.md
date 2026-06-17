@@ -1,6 +1,13 @@
 # user-side — 用户侧源评估实验
 
-本目录是 **[EC2-用户侧隔离实验点设计](../../docs/experiment/EC2-用户侧隔离实验点设计.md)** 的可运行实现：在固定拓扑 **源 → LiteLLM → Agent** 下，对 `sites.json` 登记的上游源做 **三层源评估**，并把结构化结果写入 `docs/reports/`。
+本目录包含两类可运行评估：
+
+| 模式 | 配置 | 是否经过 LiteLLM / Agent | 用途 |
+|------|------|--------------------------|------|
+| **第三方平台轻量体检** | `provider-profiles.json` | 否 | 接入前直测平台 profile、协议、stream、usage、缓存与轻量可靠性 |
+| **源 → LiteLLM → Agent 三层评估** | `sites.json` + `assess-plan.json` | 是 | 验证指定 Coding Agent 经 LiteLLM relay 后是否端到端可跑 |
+
+第二种模式是 **[EC2-用户侧隔离实验点设计](../../docs/experiment/EC2-用户侧隔离实验点设计.md)** 的可运行实现；第一种模式用于更轻量的第三方平台接入前筛查。
 
 可在本机、CI 或 EC2 Runner 上运行；脚本不绑定 AWS，设计稿中的 SG / N1–N3 出站审计属于云上增强项。
 
@@ -19,7 +26,13 @@
 
 ## 评估要回答什么
 
-对单个 **站点 id**（不可外推到其他源）：
+第三方平台轻量体检回答：
+
+1. 一个平台下的多个 profile（不同入口、不同 Key、不同协议）是否可访问？
+2. 目标模型的 `chat` / `responses` / `messages` 协议是否直连可用？
+3. stream、轻量 smoke、provider-reported usage、缓存行为和短测可靠性是否存在明显风险？
+
+源 → LiteLLM → Agent 三层评估回答：
 
 1. 源是否可达、鉴权是否有效、catalog 返回什么？
 2. 在源上，assess-plan 配置的 model × wire 能否原生跑通？
@@ -29,14 +42,24 @@
 
 ---
 
-## 拓扑
+## 两种拓扑
+
+### 第三方平台轻量体检
+
+```text
+assess-provider ──► 第三方平台 profile（provider-profiles.json base_url）
+```
+
+这条路径 **不启动 LiteLLM，不启动 Codex / Claude Code / OpenCode**。它只直测 provider profile：catalog、协议、stream、smoke、usage 合理性、轻量可靠性，以及可选缓存观察。
+
+### 源 → LiteLLM → Agent 三层评估
 
 ```text
 Layer 1–2   探针 ──────────────────────────────► 上游源（sites.json base_url）
 Layer 3     Agent / smoke ──► LiteLLM :4000 ──► 上游源
 ```
 
-LiteLLM 配置由 `maas.py write-litellm-config` 按站点生成，落在 `.runtime/litellm.<site>.yaml`；进程由 `scripts/litellm-proxy.sh` 管理。
+这条路径保留给 Coding Agent 端到端兼容性验证。LiteLLM 配置由 `maas.py write-litellm-config` 按站点生成，落在 `.runtime/litellm.<site>.yaml`；进程由 `scripts/litellm-proxy.sh` 管理。
 
 | Agent | 主 wire | LiteLLM 出站 |
 |-------|---------|--------------|
@@ -61,9 +84,9 @@ python3 lib/maas.py get assess_agents --site ai.oai.red --family gpt
 | 依赖 | 用途 |
 |------|------|
 | **Python 3** | `lib/maas.py` 主入口 |
-| **LiteLLM** | Layer 3 relay（`pip install litellm` 或项目既有环境） |
+| **LiteLLM** | 仅源 → LiteLLM → Agent 模式需要；`assess-provider` 不需要 |
 | **`.env`** | 平台 Token；`cp .env.example .env` 后填写 |
-| **Agent CLI**（可选） | `--smoke` 且 `smoke_mode=agent` 时需要；默认 `smoke_mode=relay` 可只测 HTTP |
+| **Agent CLI**（可选） | 仅源 → LiteLLM → Agent 模式需要；`assess-provider` 不需要 |
 | **代理**（可选） | 国内访问境外源时设 `MAAS_PROXY`；境外 Runner 可 `MAAS_PROXY_SKIP=1` |
 
 ---
