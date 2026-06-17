@@ -8,6 +8,7 @@
 |------|----------|----------|------------|
 | **`sites.json`** | 站点身份、URL、`protocol`（传输面）、`supported_models`、`api_key_env` | 测哪些 model、族 → Agent 映射 | Layer 1；LiteLLM 出站 URL |
 | **`assess-plan.json`** | 模型族 `families`、Layer 2 wire、Layer 3 模型与 OpenCode provider | 站点 URL、密钥 | `assess-protocol`；`write-litellm-config`；`t_*` |
+| **`provider-profiles.json`** | 第三方平台 profile：一个平台多入口、多 Key、多协议、目标模型 | Agent / LiteLLM E2E | `assess-provider` |
 | **`.env`** | API Key 值 | 站点结构 | 全部（Git 忽略） |
 
 ## 模型族 → Agent（评估主轴）
@@ -57,7 +58,31 @@ sites.json + assess-plan.json + --family
 
 run-user-side-compat.sh          L1 一次 + 按族或 --agents 批量 L3
 assess-family.sh               **推荐**：一族 L1–2 + 族内全部 Agent L3（默认 --smoke）
+assess-provider.sh             第三方平台轻量体检：profile API 直测，不跑 Agent / LiteLLM
 ```
+
+## 第三方平台 profile 评估
+
+`provider-profiles.json` 面向接入前小体检；它与 `sites.json` / `assess-plan.json` 独立。适合一个平台同时提供 OpenAI-compatible 与 Anthropic-compatible 入口，且不同模型族需要不同令牌的情况。
+
+```bash
+cp provider-profiles.example.json provider-profiles.json
+# 在 .env 中填写 provider-profiles.json 里的 api_key_env
+./scripts/assess-provider.sh --platform example --write-report
+./scripts/assess-provider.sh --platform example --provider-profile openai_gpt --cache-check
+```
+
+评估内容：
+
+- `GET /v1/models` 与 catalog 对比。
+- 目标模型 × wire 最小调用：`chat` / `responses` / `messages`。
+- 对可用 wire 做 stream 基础检查。
+- 轻量 smoke：普通生成、JSON、代码、模型自报。
+- 轻量可靠性：默认 5 次连续请求；可选 `--concurrency N`。
+- provider-reported usage 合理性检查：保留原始 usage，归一化 input/output/cache/reasoning，并用本地粗估与控制变量发现明显异常。
+- 可选 cache 行为观察：OpenAI/GPT 自动前缀缓存、Anthropic/Claude `cache_control: {"type":"ephemeral"}`。
+
+注意：usage 与 cache 都是平台自报加行为观察，不能证明真实账单；异常只表示需要账单侧或后台日志复核。
 
 ## 报告
 

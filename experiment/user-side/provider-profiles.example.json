@@ -1,0 +1,29 @@
+{
+  "description": "Third-party provider assessment profiles. Copy to provider-profiles.json and set keys in .env.",
+  "repeat": 5,
+  "concurrency": 0,
+  "timeout_sec": 120,
+  "platforms": {
+    "example": {
+      "name": "Example Provider",
+      "profiles": {
+        "openai_gpt": {
+          "base_url": "https://api.example.com/v1",
+          "api_key_env": "EXAMPLE_OPENAI_KEY",
+          "protocol": "openai",
+          "wires": ["chat", "responses"],
+          "models": ["gpt-example"],
+          "cache_test": "openai_auto_prefix"
+        },
+        "anthropic_claude": {
+          "base_url": "https://claude.example.com",
+          "api_key_env": "EXAMPLE_ANTHROPIC_KEY",
+          "protocol": "anthropic",
+          "wires": ["messages"],
+          "models": ["claude-example"],
+          "cache_test": "anthropic_ephemeral"
+        }
+      }
+    }
+  }
+}

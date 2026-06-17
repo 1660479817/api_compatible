@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime
 import json
+import math
 import os
 import re
 import socket
@@ -28,6 +30,7 @@ def workspace_root() -> Path:
 
 REPORT_TITLES: dict[str, str] = {
     "source": "源评估报告",
+    "provider": "平台评估报告",
 }
 
 
@@ -2588,6 +2591,1116 @@ def cmd_run_smoke(args: argparse.Namespace, sites: dict[str, Any]) -> None:
         raise SystemExit(1)
 
 
+PROVIDER_SMOKE_SCENARIOS: list[dict[str, Any]] = [
+    {
+        "id": "generation",
+        "required": True,
+        "prompt": "Explain what an API gateway does in two short sentences.",
+        "min_output_chars": 40,
+    },
+    {
+        "id": "json",
+        "required": True,
+        "prompt": 'Reply with only one line of valid JSON: {"status":"ok"}',
+        "expect_json_key": "status",
+        "expect_json_value": "ok",
+    },
+    {
+        "id": "code",
+        "required": True,
+        "prompt": "Write a Python function named add that takes a and b. Output only the code block.",
+        "expect_contains": "def add",
+    },
+    {
+        "id": "model_probe",
+        "required": False,
+        "model_probe": True,
+        "prompt": (
+            "Respond with ONLY one JSON object. Required keys: "
+            '"model", "knowledge_cutoff".'
+        ),
+        "expect_json_keys": ["model", "knowledge_cutoff"],
+        "expect_model_match": True,
+    },
+]
+
+
+def provider_config_path(path: str | None = None) -> Path:
+    return Path(path) if path else repo_root() / "provider-profiles.json"
+
+
+def load_provider_config(path: str | None = None) -> dict[str, Any]:
+    cfg_path = provider_config_path(path)
+    if not cfg_path.is_file():
+        raise SystemExit(
+            f"Missing provider config: {cfg_path}. "
+            "Copy provider-profiles.example.json and fill api_key_env."
+        )
+    with cfg_path.open(encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def iter_provider_profiles(
+    cfg: dict[str, Any],
+    *,
+    platform: str | None = None,
+    profile: str | None = None,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    raw_platforms = cfg.get("platforms")
+    if isinstance(raw_platforms, dict):
+        platforms = raw_platforms
+    else:
+        pid = str(cfg.get("platform_id") or "default")
+        platforms = {pid: cfg}
+
+    out: list[tuple[str, str, dict[str, Any]]] = []
+    for platform_id, platform_cfg in platforms.items():
+        if platform and platform_id != platform:
+            continue
+        profiles = platform_cfg.get("profiles")
+        if not isinstance(profiles, dict) or not profiles:
+            raise SystemExit(f"Platform {platform_id!r} has no profiles")
+        platform_defaults = {
+            k: v
+            for k, v in platform_cfg.items()
+            if k not in {"profiles", "platform_id", "name"}
+        }
+        for profile_id, profile_cfg in profiles.items():
+            if profile and profile_id != profile:
+                continue
+            merged = dict(platform_defaults)
+            merged.update(profile_cfg)
+            merged["platform_id"] = platform_id
+            merged["profile_id"] = profile_id
+            merged.setdefault("name", profile_id)
+            out.append((platform_id, profile_id, merged))
+    if not out:
+        raise SystemExit("No provider profiles matched filters")
+    return out
+
+
+def provider_profile_key(profile: dict[str, Any]) -> str:
+    env_name = str(profile.get("api_key_env") or "")
+    if not env_name:
+        raise SystemExit(
+            f"profile {profile.get('profile_id')} missing api_key_env"
+        )
+    key = os.environ.get(env_name, "").strip()
+    if not key:
+        raise SystemExit(f"Missing API key: set {env_name} in .env")
+    return key
+
+
+def provider_profile_wires(profile: dict[str, Any]) -> list[str]:
+    protocol = str(profile.get("protocol") or "openai")
+    allowed = PROTOCOL_PROFILES.get(protocol, PROTOCOL_PROFILES["openai"])["wires"]
+    raw = profile.get("wires") or allowed
+    wires = [str(w) for w in raw if str(w) in allowed]
+    if not wires:
+        raise SystemExit(
+            f"profile {profile.get('profile_id')} has no wires in protocol {protocol}"
+        )
+    return wires
+
+
+def provider_profile_models(profile: dict[str, Any]) -> list[str]:
+    models = profile.get("models")
+    if isinstance(models, str):
+        return [models]
+    if isinstance(models, list):
+        return [str(m) for m in models if m]
+    raise SystemExit(f"profile {profile.get('profile_id')} missing models")
+
+
+def provider_endpoint_url(profile: dict[str, Any], endpoint: str) -> str:
+    base = str(profile["base_url"]).rstrip("/")
+    if endpoint.startswith("/v1/") and base.endswith("/v1"):
+        return base + endpoint.removeprefix("/v1")
+    return base + endpoint
+
+
+def provider_fetch_models(profile: dict[str, Any], key: str) -> dict[str, Any]:
+    url = provider_endpoint_url(profile, "/v1/models")
+    st, payload, latency_ms = http_json("GET", url, key)
+    ids = parse_models_catalog(payload) if st == 200 else []
+    if st != 200:
+        branch = "unavailable"
+    elif ids:
+        branch = "listed"
+    else:
+        branch = "empty"
+    return {
+        "pass": st == 200,
+        "branch": branch,
+        "http_status": st,
+        "latency_ms": latency_ms,
+        "model_ids": ids,
+        "payload_shape": payload_top_level_summary(payload),
+        "error_detail": error_detail(payload) if st != 200 else "",
+        "error_shape": response_payload_shape(payload),
+    }
+
+
+def response_payload_shape(payload: Any) -> str:
+    if isinstance(payload, dict):
+        return "json"
+    if isinstance(payload, list):
+        return "json"
+    if isinstance(payload, str):
+        text = payload.lstrip().lower()
+        if text.startswith("<!doctype") or text.startswith("<html"):
+            return "html"
+        return "text"
+    if payload is None:
+        return "empty"
+    return type(payload).__name__
+
+
+def nested_value(data: Any, path: tuple[str, ...]) -> Any:
+    cur = data
+    for part in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def first_int(data: Any, paths: list[tuple[str, ...]]) -> int | None:
+    for path in paths:
+        value = int_value(nested_value(data, path))
+        if value is not None:
+            return value
+    return None
+
+
+def normalize_provider_usage(payload: Any) -> dict[str, Any]:
+    raw = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return {
+            "source": "missing",
+            "usage_schema": "missing",
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "raw_usage": raw,
+        }
+
+    input_tokens = first_int(raw, [("input_tokens",), ("prompt_tokens",)])
+    output_tokens = first_int(raw, [("output_tokens",), ("completion_tokens",)])
+    total_tokens = first_int(raw, [("total_tokens",)])
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+
+    cache_read = first_int(raw, [
+        ("cache_read_input_tokens",),
+        ("prompt_tokens_details", "cached_tokens"),
+        ("input_tokens_details", "cached_tokens"),
+        ("cached_tokens",),
+    ]) or 0
+    cache_write = first_int(raw, [
+        ("cache_creation_input_tokens",),
+        ("input_tokens_details", "cache_creation_tokens"),
+        ("input_tokens_details", "cache_creation_input_tokens"),
+    ]) or 0
+    reasoning = first_int(raw, [
+        ("reasoning_tokens",),
+        ("completion_tokens_details", "reasoning_tokens"),
+        ("output_tokens_details", "reasoning_tokens"),
+    ]) or 0
+
+    if "cache_read_input_tokens" in raw or "cache_creation_input_tokens" in raw:
+        schema = "anthropic"
+    elif isinstance(raw.get("input_tokens_details"), dict):
+        schema = "openai_responses"
+    elif isinstance(raw.get("prompt_tokens_details"), dict):
+        schema = "openai_chat"
+    else:
+        schema = "unknown"
+
+    return {
+        "source": "provider_usage",
+        "usage_schema": schema,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "reasoning_tokens": reasoning,
+        "raw_usage": raw,
+    }
+
+
+def content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(content_text(v) for v in value)
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return value["text"]
+        if isinstance(value.get("content"), str):
+            return value["content"]
+        return "\n".join(content_text(v) for v in value.values())
+    return ""
+
+
+def request_body_text(wire: str, body: dict[str, Any]) -> str:
+    if wire == "responses":
+        return content_text(body.get("input", ""))
+    parts: list[str] = []
+    if isinstance(body.get("system"), str):
+        parts.append(str(body["system"]))
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict):
+                parts.append(content_text(msg.get("content", "")))
+    return "\n".join(p for p in parts if p)
+
+
+def rough_token_count(text: str) -> int:
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    other = max(0, len(text) - cjk)
+    return max(1, math.ceil(cjk + other / 4))
+
+
+def usage_estimate(wire: str, body: dict[str, Any], response_text: str) -> dict[str, Any]:
+    input_text = request_body_text(wire, body)
+    return {
+        "input_tokens_est": rough_token_count(input_text),
+        "output_tokens_est": rough_token_count(response_text),
+        "method": "rough_cjk_char_plus_other_div4",
+    }
+
+
+def usage_plausibility(
+    provider_usage: dict[str, Any],
+    estimate: dict[str, Any],
+) -> dict[str, Any]:
+    notes: list[str] = []
+    status = "ok"
+    source = provider_usage.get("source")
+    if source == "missing":
+        return {"status": "missing", "notes": ["provider usage missing"]}
+
+    input_tokens = provider_usage.get("input_tokens")
+    output_tokens = provider_usage.get("output_tokens")
+    total_tokens = provider_usage.get("total_tokens")
+    cache_read = provider_usage.get("cache_read_tokens") or 0
+    cache_write = provider_usage.get("cache_write_tokens") or 0
+
+    if input_tokens is None or output_tokens is None:
+        status = "partial"
+        notes.append("core usage fields are partial")
+    if total_tokens is not None and output_tokens is not None and total_tokens < output_tokens:
+        status = "invalid"
+        notes.append("total_tokens < output_tokens")
+    if input_tokens is not None and cache_read > input_tokens:
+        status = "invalid"
+        notes.append("cache_read_tokens > input_tokens")
+    if input_tokens is not None and cache_write > input_tokens:
+        status = "invalid"
+        notes.append("cache_write_tokens > input_tokens")
+    if (
+        input_tokens == 0
+        and output_tokens == 0
+        and total_tokens == 0
+        and status != "invalid"
+    ):
+        status = "suspicious"
+        notes.append("all provider usage token fields are zero")
+
+    est_input = estimate.get("input_tokens_est") or 0
+    est_output = estimate.get("output_tokens_est") or 0
+    if input_tokens and est_input:
+        ratio = input_tokens / est_input
+        notes.append(f"input_ratio={ratio:.2f}")
+        if ratio > 3 or ratio < 0.33:
+            status = "suspicious" if status == "ok" else status
+            notes.append("provider input usage differs from local estimate by >3x")
+    if output_tokens and est_output:
+        ratio = output_tokens / est_output
+        notes.append(f"output_ratio={ratio:.2f}")
+        if ratio > 3 or ratio < 0.33:
+            status = "suspicious" if status == "ok" else status
+            notes.append("provider output usage differs from local estimate by >3x")
+
+    if not notes:
+        notes.append("provider usage present")
+    return {"status": status, "notes": notes}
+
+
+def provider_sync_probe(
+    profile: dict[str, Any],
+    key: str,
+    model: str,
+    wire: str,
+    prompt: str,
+    *,
+    timeout: float = 120,
+    body_override: dict[str, Any] | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    body, extra = smoke_wire_body(wire, model, prompt)
+    if body_override is not None:
+        body = body_override
+    if extra_headers:
+        extra = {**(extra or {}), **extra_headers}
+    endpoint = WIRE_TO_ENDPOINT[wire]
+    url = provider_endpoint_url(profile, endpoint)
+    st, payload, latency_ms = http_json(
+        "POST", url, key, body, extra_headers=extra, timeout=timeout
+    )
+    text = wire_response_text(wire, payload) if st == 200 else error_detail(payload)
+    shape = wire_response_shape(wire, payload) if st == 200 else "missing"
+    ok = st == 200 and shape == "ok"
+    provider_usage = normalize_provider_usage(payload)
+    estimate = usage_estimate(wire, body, text if st == 200 else "")
+    usage_check = usage_plausibility(provider_usage, estimate)
+    response_model = str(payload.get("model", "")) if isinstance(payload, dict) else ""
+    return {
+        "model": model,
+        "wire": wire,
+        "endpoint": endpoint,
+        "url": url,
+        "http_status": st,
+        "ok": ok,
+        "result": "OK" if ok else probe_label(st, {200}) if st != 200 else "EMPTY",
+        "latency_ms": latency_ms,
+        "response_shape": shape,
+        "response_text": text,
+        "response_excerpt": output_excerpt(text),
+        "response_model": response_model,
+        "payload_shape": payload_top_level_summary(payload),
+        "error_shape": response_payload_shape(payload),
+        "provider_usage": provider_usage,
+        "local_estimate": estimate,
+        "usage_plausibility": usage_check,
+        "request": {"body": body, "extra_headers": extra or {}},
+    }
+
+
+def provider_stream_probe(
+    profile: dict[str, Any],
+    key: str,
+    model: str,
+    wire: str,
+    *,
+    timeout: float = 120,
+) -> dict[str, Any]:
+    body, extra = smoke_wire_body(wire, model, "Reply OK", max_tokens=64)
+    body["stream"] = True
+    endpoint = WIRE_TO_ENDPOINT[wire]
+    url = provider_endpoint_url(profile, endpoint)
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    if extra:
+        headers.update(extra)
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    t0 = time.perf_counter()
+    try:
+        with _http_opener(url).open(req, timeout=timeout) as resp:
+            first = resp.read(2048)
+            ttfb_ms = round((time.perf_counter() - t0) * 1000, 1)
+            tail = resp.read(4096)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            chunk = first + tail
+            http_status = getattr(resp, "status", 200)
+    except urllib.error.HTTPError as exc:
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return {
+            "model": model,
+            "wire": wire,
+            "ok": False,
+            "stream": "fail",
+            "http_status": exc.code,
+            "latency_ms": latency_ms,
+            "ttfb_ms": None,
+            "stream_duration_ms": None,
+            "detail": error_detail(exc.read().decode("utf-8", errors="replace")),
+        }
+    except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return {
+            "model": model,
+            "wire": wire,
+            "ok": False,
+            "stream": "fail",
+            "http_status": 0,
+            "latency_ms": latency_ms,
+            "ttfb_ms": None,
+            "stream_duration_ms": None,
+            "detail": str(exc)[:160],
+        }
+    markers = (b"data:", b"event:", b"content_block_delta", b"response.output_text.delta")
+    ok = any(m in chunk for m in markers)
+    return {
+        "model": model,
+        "wire": wire,
+        "ok": ok,
+        "stream": "ok" if ok else "fail",
+        "http_status": http_status,
+        "latency_ms": latency_ms,
+        "ttfb_ms": ttfb_ms,
+        "stream_duration_ms": round(latency_ms - ttfb_ms, 1),
+        "detail": "" if ok else "missing SSE markers",
+    }
+
+
+def primary_wire_by_model(protocol_rows: list[dict[str, Any]]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    preferred = {"responses": 0, "messages": 1, "chat": 2}
+    for row in protocol_rows:
+        if not row.get("ok"):
+            continue
+        model = row["model"]
+        wire = row["wire"]
+        if model not in out or preferred.get(wire, 9) < preferred.get(out[model], 9):
+            out[model] = wire
+    return out
+
+
+def run_provider_smoke(
+    profile: dict[str, Any],
+    key: str,
+    wire_map: dict[str, str],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    required_failed = 0
+    optional_failed = 0
+    for model, wire in wire_map.items():
+        for scenario in PROVIDER_SMOKE_SCENARIOS:
+            resolved = dict(scenario)
+            if resolved.get("model_probe") or resolved.get("expect_model_match"):
+                resolved["expect_model_id"] = model
+            probe = provider_sync_probe(
+                profile, key, model, wire, str(resolved["prompt"]), timeout=timeout
+            )
+            ok, reason, extra = evaluate_smoke_output(
+                resolved,
+                probe["response_text"],
+                0 if probe["ok"] else 1,
+                response_model=probe.get("response_model", ""),
+            )
+            if ok and extra.get("model_match") is False:
+                optional_failed += 1
+                reason = extra.get("model_probe_note") or reason
+            elif not ok:
+                if resolved.get("required", True):
+                    required_failed += 1
+                else:
+                    optional_failed += 1
+            rows.append({
+                "model": model,
+                "wire": wire,
+                "id": resolved["id"],
+                "required": bool(resolved.get("required", True)),
+                "pass": ok,
+                "reason": reason,
+                "latency_ms": probe["latency_ms"],
+                "output_excerpt": probe["response_excerpt"],
+                "provider_usage": probe["provider_usage"],
+                "usage_plausibility": probe["usage_plausibility"],
+                **extra,
+            })
+    if required_failed:
+        status = "fail"
+    elif optional_failed:
+        status = "warn"
+    else:
+        status = "pass"
+    return {
+        "status": status,
+        "pass": status != "fail",
+        "required_failed": required_failed,
+        "optional_failed": optional_failed,
+        "scenarios": rows,
+    }
+
+
+def run_provider_reliability(
+    profile: dict[str, Any],
+    key: str,
+    wire_map: dict[str, str],
+    *,
+    repeat: int,
+    concurrency: int,
+    timeout: float,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for model, wire in wire_map.items():
+        for attempt in range(1, repeat + 1):
+            probe = provider_sync_probe(
+                profile, key, model, wire, "Reply exactly: OK", timeout=timeout
+            )
+            rows.append({
+                "model": model,
+                "wire": wire,
+                "mode": "repeat",
+                "attempt": attempt,
+                "ok": probe["ok"],
+                "http_status": probe["http_status"],
+                "latency_ms": probe["latency_ms"],
+                "provider_usage": probe["provider_usage"],
+                "usage_plausibility": probe["usage_plausibility"],
+                "error": "" if probe["ok"] else probe["response_excerpt"],
+            })
+
+        if concurrency > 0:
+            def one(idx: int) -> dict[str, Any]:
+                probe = provider_sync_probe(
+                    profile, key, model, wire, "Reply exactly: OK", timeout=timeout
+                )
+                return {
+                    "model": model,
+                    "wire": wire,
+                    "mode": "concurrency",
+                    "attempt": idx,
+                    "ok": probe["ok"],
+                    "http_status": probe["http_status"],
+                    "latency_ms": probe["latency_ms"],
+                    "provider_usage": probe["provider_usage"],
+                    "usage_plausibility": probe["usage_plausibility"],
+                    "error": "" if probe["ok"] else probe["response_excerpt"],
+                }
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
+                rows.extend(ex.map(one, range(1, concurrency + 1)))
+
+    return {"rows": rows, "summary": summarize_records(rows)}
+
+
+def percentile(values: list[float], pct: float) -> float | None:
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    idx = max(0, min(len(vals) - 1, math.ceil((pct / 100) * len(vals)) - 1))
+    return vals[idx]
+
+
+def summarize_records(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(rows)
+    success = sum(1 for r in rows if r.get("ok") or r.get("pass"))
+    latencies = [float(r["latency_ms"]) for r in rows if r.get("latency_ms") is not None]
+    usage_status: dict[str, int] = {}
+    token_totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 0,
+    }
+    for row in rows:
+        usage = row.get("provider_usage") or {}
+        check = row.get("usage_plausibility") or {}
+        st = check.get("status", usage.get("source", "unknown"))
+        usage_status[st] = usage_status.get(st, 0) + 1
+        for key in token_totals:
+            val = usage.get(key)
+            if isinstance(val, int):
+                token_totals[key] += val
+    return {
+        "requests": total,
+        "success": success,
+        "failed": total - success,
+        "success_rate": round(success / total, 3) if total else 0,
+        "latency_avg_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
+        "latency_min_ms": min(latencies) if latencies else None,
+        "latency_max_ms": max(latencies) if latencies else None,
+        "latency_p50_ms": percentile(latencies, 50),
+        "latency_p95_ms": percentile(latencies, 95),
+        "usage_status": usage_status,
+        "token_totals": token_totals,
+    }
+
+
+def fixed_cache_prefix() -> str:
+    line = (
+        "Stable cache prefix sentence with deterministic wording for provider "
+        "cache behavior observation. "
+    )
+    return "\n".join(f"{i:03d}: {line}" for i in range(220))
+
+
+def run_openai_cache_observation(
+    profile: dict[str, Any],
+    key: str,
+    model: str,
+    wire: str,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    prefix = fixed_cache_prefix()
+    p1 = provider_sync_probe(
+        profile, key, model, wire, prefix + "\nQuestion A: reply OK.", timeout=timeout
+    )
+    p2 = provider_sync_probe(
+        profile, key, model, wire, prefix + "\nQuestion B: reply OK.", timeout=timeout
+    )
+    read1 = p1["provider_usage"].get("cache_read_tokens") or 0
+    read2 = p2["provider_usage"].get("cache_read_tokens") or 0
+    input2 = p2["provider_usage"].get("input_tokens")
+    notes = [
+        f"request1_cache_read={read1}",
+        f"request2_cache_read={read2}",
+        "OpenAI-compatible cache is automatic; not_observed is not a hard failure",
+    ]
+    if input2 is not None and read2 > input2:
+        status = "suspicious"
+        notes.append("cache_read_tokens > input_tokens")
+    elif read2 > 0:
+        status = "observed"
+    elif p1["provider_usage"].get("source") == "missing" and p2["provider_usage"].get("source") == "missing":
+        status = "unsupported_or_hidden"
+    else:
+        status = "not_observed"
+    return {
+        "type": "openai_auto_prefix",
+        "model": model,
+        "wire": wire,
+        "status": status,
+        "notes": notes,
+        "requests": [p1, p2],
+    }
+
+
+def anthropic_cache_body(model: str, prefix: str, suffix: str) -> dict[str, Any]:
+    return {
+        "model": model,
+        "max_tokens": 64,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": prefix,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": suffix},
+            ],
+        }],
+    }
+
+
+def run_anthropic_cache_observation(
+    profile: dict[str, Any],
+    key: str,
+    model: str,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    prefix = fixed_cache_prefix()
+    extra = {"anthropic-version": "2023-06-01"}
+    p1 = provider_sync_probe(
+        profile,
+        key,
+        model,
+        "messages",
+        "",
+        timeout=timeout,
+        body_override=anthropic_cache_body(model, prefix, "Question A: reply OK."),
+        extra_headers=extra,
+    )
+    p2 = provider_sync_probe(
+        profile,
+        key,
+        model,
+        "messages",
+        "",
+        timeout=timeout,
+        body_override=anthropic_cache_body(model, prefix, "Question B: reply OK."),
+        extra_headers=extra,
+    )
+    write1 = p1["provider_usage"].get("cache_write_tokens") or 0
+    read2 = p2["provider_usage"].get("cache_read_tokens") or 0
+    notes = [f"request1_cache_write={write1}", f"request2_cache_read={read2}"]
+    if not p1["ok"] or not p2["ok"]:
+        status = "unsupported"
+        notes.append("cache_control request failed")
+    elif write1 > 0 and read2 > 0:
+        status = "observed"
+    elif write1 > 0:
+        status = "creation_only"
+    elif p1["provider_usage"].get("source") == "missing":
+        status = "unsupported_or_hidden"
+    else:
+        status = "not_observed"
+    return {
+        "type": "anthropic_ephemeral",
+        "model": model,
+        "wire": "messages",
+        "status": status,
+        "notes": notes,
+        "requests": [p1, p2],
+    }
+
+
+def run_provider_cache_observation(
+    profile: dict[str, Any],
+    key: str,
+    wire_map: dict[str, str],
+    *,
+    timeout: float,
+) -> dict[str, Any] | None:
+    cache_kind = str(profile.get("cache_test") or "").strip()
+    if not cache_kind:
+        protocol = str(profile.get("protocol") or "")
+        cache_kind = "anthropic_ephemeral" if protocol == "anthropic" else "openai_auto_prefix"
+    if not wire_map:
+        return None
+    model = next(iter(wire_map))
+    wire = wire_map[model]
+    if cache_kind == "anthropic_ephemeral":
+        if wire != "messages" and "messages" in provider_profile_wires(profile):
+            wire = "messages"
+        if wire != "messages":
+            return {
+                "type": cache_kind,
+                "status": "unsupported",
+                "notes": ["anthropic cache check requires messages wire"],
+            }
+        return run_anthropic_cache_observation(profile, key, model, timeout=timeout)
+    return run_openai_cache_observation(profile, key, model, wire, timeout=timeout)
+
+
+def profile_grade(profile_result: dict[str, Any]) -> str:
+    protocol_ok = any(r.get("ok") for r in profile_result.get("protocol", []))
+    if not protocol_ok:
+        return "D"
+    if any(
+        r.get("usage_plausibility", {}).get("status") == "invalid"
+        for r in profile_result.get("all_request_records", [])
+    ):
+        return "D"
+    reliability = profile_result.get("reliability", {}).get("summary", {})
+    if reliability and reliability.get("success_rate", 1) <= 0.6:
+        return "D"
+    smoke_status = profile_result.get("smoke", {}).get("status")
+    if smoke_status == "fail":
+        return "C"
+    if reliability and reliability.get("success_rate", 1) < 1:
+        return "B"
+    if any(
+        r.get("usage_plausibility", {}).get("status") in {"suspicious", "missing", "partial"}
+        for r in profile_result.get("all_request_records", [])
+    ):
+        return "B"
+    if any(s.get("stream") == "fail" for s in profile_result.get("stream", [])):
+        return "B"
+    return "A"
+
+
+def run_provider_profile(
+    platform_id: str,
+    profile_id: str,
+    profile: dict[str, Any],
+    *,
+    repeat: int,
+    concurrency: int,
+    timeout: float,
+    cache_check: bool,
+) -> dict[str, Any]:
+    key = provider_profile_key(profile)
+    catalog = provider_fetch_models(profile, key)
+    models = provider_profile_models(profile)
+    wires = provider_profile_wires(profile)
+    catalog_set = set(catalog.get("model_ids") or [])
+
+    protocol_rows: list[dict[str, Any]] = []
+    for model in models:
+        for wire in wires:
+            protocol_rows.append(
+                provider_sync_probe(profile, key, model, wire, "Reply OK", timeout=timeout)
+            )
+
+    stream_rows: list[dict[str, Any]] = []
+    for row in protocol_rows:
+        if row.get("ok"):
+            stream_rows.append(
+                provider_stream_probe(
+                    profile, key, row["model"], row["wire"], timeout=timeout
+                )
+            )
+
+    wire_map = primary_wire_by_model(protocol_rows)
+    smoke = run_provider_smoke(profile, key, wire_map, timeout=timeout) if wire_map else {
+        "status": "fail",
+        "pass": False,
+        "scenarios": [],
+        "required_failed": 1,
+        "optional_failed": 0,
+    }
+    reliability = run_provider_reliability(
+        profile,
+        key,
+        wire_map,
+        repeat=repeat,
+        concurrency=concurrency,
+        timeout=timeout,
+    ) if wire_map else {"rows": [], "summary": summarize_records([])}
+    cache = (
+        run_provider_cache_observation(profile, key, wire_map, timeout=timeout)
+        if cache_check and wire_map
+        else None
+    )
+
+    records: list[dict[str, Any]] = []
+    records.extend(protocol_rows)
+    records.extend(smoke.get("scenarios", []))
+    records.extend(reliability.get("rows", []))
+    if cache:
+        records.extend(cache.get("requests", []))
+
+    result = {
+        "platform_id": platform_id,
+        "profile_id": profile_id,
+        "name": profile.get("name", profile_id),
+        "base_url": profile.get("base_url"),
+        "api_key_env": profile.get("api_key_env"),
+        "protocol_name": profile.get("protocol", "openai"),
+        "models": models,
+        "wires": wires,
+        "catalog": catalog,
+        "model_catalog": [
+            {"model": m, "in_catalog": m in catalog_set} for m in models
+        ],
+        "protocol": protocol_rows,
+        "stream": stream_rows,
+        "smoke": smoke,
+        "reliability": reliability,
+        "cache_observation": cache,
+        "metrics": summarize_records(records),
+        "all_request_records": records,
+    }
+    result["grade"] = profile_grade(result)
+    return result
+
+
+def provider_report_path(platform_id: str, day: str) -> Path:
+    return workspace_root() / "docs" / "reports" / f"{platform_id}-平台评估报告-{day}.md"
+
+
+def platform_grade(profile_results: list[dict[str, Any]]) -> str:
+    grades = [r.get("grade", "D") for r in profile_results]
+    if not grades:
+        return "D"
+    if "D" in grades:
+        return "D"
+    if "C" in grades:
+        return "C"
+    if "B" in grades:
+        return "B"
+    return "A"
+
+
+def render_provider_report(result: dict[str, Any]) -> str:
+    day = result["date"]
+    platform_id = result["platform_id"]
+    lines = [
+        f"# {platform_id} 平台评估报告 - {day}",
+        "",
+        f"- Overall grade: **{result['grade']}**",
+        f"- Cache check: **{'yes' if result.get('cache_check') else 'no'}**",
+        "- Scope: provider API/profile checks only; Agent E2E is excluded.",
+        "- Usage note: token usage is provider-reported plus local plausibility checks, not billing audit.",
+        "",
+        "## Profiles",
+        "",
+        "| Profile | Protocol | Models | Wires | Grade | Success | Avg ms | Usage |",
+        "|---|---|---:|---|---:|---:|---:|---|",
+    ]
+    for prof in result["profiles"]:
+        metrics = prof.get("metrics", {})
+        usage_status = ", ".join(
+            f"{k}:{v}" for k, v in sorted((metrics.get("usage_status") or {}).items())
+        )
+        lines.append(
+            f"| `{prof['profile_id']}` | {prof['protocol_name']} | "
+            f"{len(prof['models'])} | {', '.join(prof['wires'])} | "
+            f"**{prof['grade']}** | {metrics.get('success_rate', 0)} | "
+            f"{metrics.get('latency_avg_ms', '—')} | {usage_status or '—'} |"
+        )
+    for prof in result["profiles"]:
+        lines.extend([
+            "",
+            f"## Profile `{prof['profile_id']}`",
+            "",
+            f"- Base URL: `{prof['base_url']}`",
+            f"- API key env: `{prof['api_key_env']}`",
+            f"- Catalog: `{prof['catalog']['branch']}` HTTP {prof['catalog']['http_status']} · {prof['catalog']['latency_ms']} ms",
+            "",
+            "### Protocol",
+            "",
+            "| Model | Wire | HTTP | Shape | ms | Result | Usage |",
+            "|---|---|---:|---|---:|---|---|",
+        ])
+        for row in prof["protocol"]:
+            usage_st = row.get("usage_plausibility", {}).get("status", "?")
+            result_label = "PASS" if row.get("ok") else "FAIL"
+            lines.append(
+                f"| `{row['model']}` | `{row['wire']}` | {row['http_status']} | "
+                f"{row['response_shape']} | {row['latency_ms']} | {result_label} | {usage_st} |"
+            )
+        lines.extend([
+            "",
+            "### Stream",
+            "",
+            "| Model | Wire | Status | TTFB ms | Total ms |",
+            "|---|---|---|---:|---:|",
+        ])
+        for row in prof["stream"]:
+            lines.append(
+                f"| `{row['model']}` | `{row['wire']}` | {row['stream']} | "
+                f"{row.get('ttfb_ms', '—')} | {row.get('latency_ms', '—')} |"
+            )
+        smoke = prof.get("smoke", {})
+        lines.extend([
+            "",
+            f"### Smoke: `{smoke.get('status', 'not_run')}`",
+            "",
+            "| Model | Scenario | Required | Result | ms | Note |",
+            "|---|---|---|---|---:|---|",
+        ])
+        for row in smoke.get("scenarios", []):
+            lines.append(
+                f"| `{row['model']}` | `{row['id']}` | {row['required']} | "
+                f"{'PASS' if row['pass'] else 'FAIL'} | {row['latency_ms']} | "
+                f"{row.get('reason') or row.get('model_probe_note') or ''} |"
+            )
+        rel = prof.get("reliability", {}).get("summary", {})
+        lines.extend([
+            "",
+            "### Reliability",
+            "",
+            f"- Requests: {rel.get('requests', 0)}",
+            f"- Success rate: {rel.get('success_rate', 0)}",
+            f"- Latency avg/p50/p95/max ms: {rel.get('latency_avg_ms', '—')} / {rel.get('latency_p50_ms', '—')} / {rel.get('latency_p95_ms', '—')} / {rel.get('latency_max_ms', '—')}",
+        ])
+        cache = prof.get("cache_observation")
+        if cache:
+            lines.extend([
+                "",
+                "### Cache Observation",
+                "",
+                f"- Type: `{cache.get('type')}`",
+                f"- Status: **{cache.get('status')}**",
+            ])
+            for note in cache.get("notes", []):
+                lines.append(f"- {note}")
+        totals = prof.get("metrics", {}).get("token_totals", {})
+        lines.extend([
+            "",
+            "### Provider-Reported Token Totals",
+            "",
+            f"- input_tokens: {totals.get('input_tokens', 0)}",
+            f"- output_tokens: {totals.get('output_tokens', 0)}",
+            f"- cache_read_tokens: {totals.get('cache_read_tokens', 0)}",
+            f"- cache_write_tokens: {totals.get('cache_write_tokens', 0)}",
+            f"- reasoning_tokens: {totals.get('reasoning_tokens', 0)}",
+        ])
+    return "\n".join(lines) + "\n"
+
+
+def print_provider_assessment(result: dict[str, Any]) -> None:
+    print(f"Provider assessment: {result['platform_id']} grade={result['grade']}")
+    for prof in result["profiles"]:
+        metrics = prof.get("metrics", {})
+        rel = prof.get("reliability", {}).get("summary", {})
+        print(
+            f"- {prof['profile_id']}: grade={prof['grade']} "
+            f"protocol_ok={sum(1 for r in prof['protocol'] if r.get('ok'))}/{len(prof['protocol'])} "
+            f"smoke={prof.get('smoke', {}).get('status')} "
+            f"success_rate={rel.get('success_rate', 0)} "
+            f"avg_ms={metrics.get('latency_avg_ms', '—')}"
+        )
+        cache = prof.get("cache_observation")
+        if cache:
+            print(f"  cache={cache.get('status')} ({cache.get('type')})")
+
+
+def cmd_assess_provider(args: argparse.Namespace, sites: dict[str, Any]) -> None:
+    """Assess third-party provider profiles without Agent/LiteLLM E2E."""
+    cfg = load_provider_config(args.config)
+    day = args.date or datetime.date.today().isoformat()
+    selected = iter_provider_profiles(
+        cfg, platform=args.platform, profile=args.provider_profile
+    )
+    repeat = args.repeat if args.repeat is not None else int(cfg.get("repeat", 5))
+    concurrency = (
+        args.concurrency if args.concurrency is not None else int(cfg.get("concurrency", 0))
+    )
+    timeout = float(args.timeout or cfg.get("timeout_sec", 120))
+    by_platform: dict[str, list[dict[str, Any]]] = {}
+    for platform_id, profile_id, profile in selected:
+        prof_repeat = int(profile.get("repeat", repeat))
+        prof_concurrency = int(profile.get("concurrency", concurrency))
+        by_platform.setdefault(platform_id, []).append(
+            run_provider_profile(
+                platform_id,
+                profile_id,
+                profile,
+                repeat=prof_repeat,
+                concurrency=prof_concurrency,
+                timeout=timeout,
+                cache_check=args.cache_check,
+            )
+        )
+
+    outputs: list[dict[str, Any]] = []
+    for platform_id, profiles in by_platform.items():
+        result = {
+            "platform_id": platform_id,
+            "date": day,
+            "grade": platform_grade(profiles),
+            "cache_check": args.cache_check,
+            "repeat": repeat,
+            "concurrency": concurrency,
+            "profiles": profiles,
+        }
+        out_json = repo_root() / ".runtime" / f"{platform_id}-provider-assess-{day.replace('-', '')}.json"
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        result["json_path"] = str(out_json)
+        if args.write_report:
+            rp = provider_report_path(platform_id, day)
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            rp.write_text(render_provider_report(result), encoding="utf-8")
+            result["report_path"] = str(rp)
+        outputs.append(result)
+        print_provider_assessment(result)
+        print(f"  JSON: {out_json}")
+        if args.write_report:
+            print(f"  Report: {result['report_path']}")
+    if args.json:
+        print(json.dumps(outputs, ensure_ascii=False, indent=2))
+    if any(r["grade"] == "D" for r in outputs):
+        raise SystemExit(1)
+
+
 def smoke_result_label(row: dict[str, Any]) -> str:
     if row.get("skipped"):
         return "SKIP"
@@ -3136,6 +4249,30 @@ def build_parser() -> argparse.ArgumentParser:
     add_assess_verbose_arg(p)
     add_assess_profile_arg(p)
     p.set_defaults(func=cmd_assess_source)
+
+    p = sub.add_parser(
+        "assess-provider",
+        help="Assess third-party provider profiles without Agent/LiteLLM E2E",
+    )
+    p.add_argument(
+        "--config",
+        default=str(repo_root() / "provider-profiles.json"),
+        help="Provider profile config JSON (default: provider-profiles.json)",
+    )
+    p.add_argument("--platform", help="Only assess one platform_id")
+    p.add_argument(
+        "--provider-profile",
+        dest="provider_profile",
+        help="Only assess one profile id inside the platform",
+    )
+    p.add_argument("--repeat", type=int, help="Sequential reliability repeat count")
+    p.add_argument("--concurrency", type=int, help="Optional concurrent request count")
+    p.add_argument("--timeout", type=float, help="Per request timeout seconds")
+    p.add_argument("--cache-check", action="store_true", help="Run optional cache behavior observation")
+    p.add_argument("--write-report", action="store_true", help="Write docs/reports/{platform}-平台评估报告-{date}.md")
+    p.add_argument("--date", help="YYYY-MM-DD (default: today)")
+    p.add_argument("--json", action="store_true", help="Also print full JSON result")
+    p.set_defaults(func=cmd_assess_provider)
 
     p = sub.add_parser("report-path", help="Print docs/reports path for source assessment")
     p.add_argument("--site", required=True)

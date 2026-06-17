@@ -2,6 +2,7 @@
 .env
 .runtime/
 opencode.json
+provider-profiles.json
 
 # OS
 .DS_Store

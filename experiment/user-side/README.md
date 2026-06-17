@@ -10,6 +10,7 @@
 |------|------|
 | [`sites.json`](./sites.json) | **描述站点**：URL、`protocol`、文档模型列表、`api_key_env` |
 | [`assess-plan.json`](./assess-plan.json) | **描述测什么**：模型族 `families`、Layer 2 wire、Layer 3 模型与 smoke |
+| [`provider-profiles.example.json`](./provider-profiles.example.json) | **第三方平台 profile 体检模板**：一个平台多入口、多 Key、多协议；不跑 Agent/LiteLLM E2E |
 | [`.env`](./.env.example) | API Key（Git 忽略；变量名对齐 `api_key_env`） |
 
 协作与 Git 规则：[AGENTS.md](./AGENTS.md)
@@ -84,12 +85,23 @@ source .env
 python3 lib/maas.py assess-source --site ai.oai.red --family gpt --agent codex --smoke --write-report
 ```
 
+第三方平台接入前轻量体检（不跑 Agent / LiteLLM E2E）：
+
+```bash
+cp provider-profiles.example.json provider-profiles.json
+# 在 .env 中填写 provider-profiles.json 的 api_key_env
+./scripts/assess-provider.sh --platform example --write-report
+./scripts/assess-provider.sh --platform example --provider-profile openai_gpt --cache-check
+```
+
 **产出**：
 
 | 产物 | 路径 |
 |------|------|
 | Markdown 报告 | `docs/reports/{report_domain}-源评估报告-{YYYY-MM-DD}.md` |
 | 结构化 JSON | `.runtime/{site}-assess-{YYYYMMDD}.json` |
+| 第三方平台 Markdown | `docs/reports/{platform}-平台评估报告-{YYYY-MM-DD}.md` |
+| 第三方平台 JSON | `.runtime/{platform}-provider-assess-{YYYYMMDD}.json` |
 | LiteLLM 日志 | `.runtime/litellm.{site}.log` |
 
 查询报告路径：
@@ -169,6 +181,7 @@ experiment/user-side/
 | `run-source-agent-test.sh` | 仅 Layer 3（`--probe-only` / `--smoke`） |
 | `run-user-side-compat.sh` | 批量；`--layers-12` 只跑 1–2 |
 | `litellm-proxy.sh` | `start \| stop \| status --site <id>` |
+| `assess-provider.sh` | 第三方平台 profile 直测：catalog、协议、stream、smoke、usage 合理性、轻量可靠性、可选缓存观察 |
 
 ---
 
@@ -189,6 +202,7 @@ experiment/user-side/
 | `probe-relay --site <id> --agent <name>` | Layer 3 relay 探针 |
 | `run-smoke --site <id> --agent <name>` | Layer 3 smoke |
 | `assess-source --site <id> --agent <name> [--smoke] [--write-report]` | 完整评估 |
+| `assess-provider --config provider-profiles.json [--cache-check] [--write-report]` | 第三方平台轻量体检，不跑 Agent/LiteLLM E2E |
 | `report-path --site <id> --relative` | 报告 Markdown 路径 |
 | `write-litellm-config --site <id> --out .runtime/litellm.<id>.yaml` | 生成 LiteLLM 配置 |
 
