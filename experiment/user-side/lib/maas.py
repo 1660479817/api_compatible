@@ -42,6 +42,11 @@ WIRE_HEADERS = {
     "messages": {"anthropic-version": "2023-06-01"},
 }
 
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
+
 PROVIDER_SMOKE_SCENARIOS: list[dict[str, Any]] = [
     {
         "id": "generation",
@@ -228,6 +233,7 @@ def http_json(
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": os.environ.get("MAAS_USER_AGENT", DEFAULT_USER_AGENT),
     }
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -645,6 +651,7 @@ def provider_stream_probe(
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
+        "User-Agent": os.environ.get("MAAS_USER_AGENT", DEFAULT_USER_AGENT),
     }
     headers.update(extra)
     req = urllib.request.Request(
